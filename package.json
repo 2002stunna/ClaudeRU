@@ -1,6 +1,20 @@
 {
-  "name": "clauderu", "version": "0.1.0", "private": true, "type": "module",
-  "engines": {"node": ">=22"},
-  "scripts": {"setup": "node setup.mjs", "login": "node login.mjs", "start": "node server.mjs", "test": "node --test"},
-  "dependencies": {"playwright": "1.56.1"}
+  "name": "clauderu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "setup": "node setup.mjs",
+    "login": "node login.mjs",
+    "start": "node server.mjs",
+    "test": "node --test",
+    "browser:yandex": "node browser.mjs yandex",
+    "browser:chromium": "node browser.mjs chromium"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  }
 }

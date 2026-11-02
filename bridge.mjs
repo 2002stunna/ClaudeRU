@@ -1,5 +1,4 @@
-import { chromium } from 'playwright';
-import { mkdir } from 'node:fs/promises';
+import { launchBrowser } from './browser.mjs';
 
 // Only claude.ai conversation URLs can enter the automation browser.
 export function conversationURL(value) {
@@ -12,8 +11,7 @@ export function conversationURL(value) {
 export class ClaudeBridge {
   context; busy = false;
   async open() {
-    await mkdir('.local/browser', {recursive:true, mode:0o700});
-    this.context = await chromium.launchPersistentContext('.local/browser', { headless: false });
+    this.context = await launchBrowser();
   }
   async close() { await this.context?.close(); }
   async send({ text, url, onUpdate }) {
