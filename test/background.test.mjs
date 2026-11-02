@@ -36,3 +36,24 @@ test('background checks stale page readiness before requesting or running a job'
   const fetch=async(url,options)=>{assert.ok(url.endsWith('/poll'));assert.equal(options.headers['X-ClaudeRU-Protocol'],'4');assert.notEqual(options.headers['X-ClaudeRU-Page-Protocol'],'4');return{ok:false,status:426,json:async()=>({error:'Обновите вкладку Claude'})};};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.deepEqual(messages,['ready']);
 });
+test('existing new-chat pages are reused and navigation happens only when changing conversations',async()=>{
+  const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
+  for(const scenario of [
+    {kind:'chat',url:null,current:'https://claude.ai/new',navigate:false},
+    {kind:'options',url:null,current:'https://claude.ai/',navigate:false},
+    {kind:'options',url:null,current:'https://claude.ai/new?from=sidebar',navigate:false},
+    {kind:'inspect',url:null,current:'https://claude.ai/chat/first',navigate:false},
+    {kind:'chat',url:'https://claude.ai/chat/first',current:'https://claude.ai/chat/first',navigate:false},
+    {kind:'chat',url:null,current:'https://claude.ai/chat/first',navigate:true},
+    {kind:'open',url:'https://claude.ai/chat/second',current:'https://claude.ai/chat/first',navigate:true}
+  ]){
+    let config={token:'a'.repeat(64),tabId:7},pollCount=0,releasePoll,completed,current=scenario.current;
+    const done=new Promise(r=>completed=r),navigation=[],runs=[];
+    const job={id:'test-job',kind:scenario.kind,text:'hello',url:scenario.url};
+    const respond=data=>({ok:true,status:200,json:async()=>data});
+    const fetch=async(url,options)=>{if(url.endsWith('/poll')){if(pollCount++===0)return respond(job);return new Promise(r=>releasePoll=()=>r(respond({idle:true})));}const event=JSON.parse(options.body);assert.equal(event.type,'done',event.error);config={};releasePoll?.();completed();return respond({ok:true});};
+    const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:current,status:'complete'}),update:async(id,{url})=>{navigation.push(url);current=url;},sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:4};runs.push(message);return{done:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.4.2'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+    vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;
+    assert.equal(navigation.length,scenario.navigate?1:0,JSON.stringify(scenario));assert.equal(runs.length,1);
+  }
+});

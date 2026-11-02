@@ -4,9 +4,9 @@ import { conversationURL } from './bridge.mjs';
 
 export class ExtensionBridge {
   constructor({ token = randomBytes(32).toString('hex'), timeout = 240000 } = {}) {
-    this.token = token; this.timeout = timeout; this.lastSeen = 0; this.pending = null; this.compatibilityError=null; this.clientVersion=null;
+    this.token = token; this.timeout = timeout; this.lastSeen = 0; this.pending = null; this.compatibilityError=null; this.clientVersion=null; this.pollWaiters=new Set();
   }
-  get status() { const connected=Date.now()-this.lastSeen<30000;return {connected,mode:'extension',extensionVersion:this.clientVersion,error:connected?null:this.compatibilityError}; }
+  get status() { const connected=Date.now()-this.lastSeen<5000;return {connected,mode:'extension',extensionVersion:this.clientVersion,error:connected?null:this.compatibilityError}; }
   async open(port = 3001) {
     this.server = http.createServer(async (req, res) => {
       const json = (status, data) => { res.writeHead(status, {'Content-Type':'application/json','Cache-Control':'no-store'}); res.end(JSON.stringify(data)); };
@@ -28,7 +28,7 @@ export class ExtensionBridge {
         if(req.headers['x-clauderu-protocol']!=='4'||req.headers['x-clauderu-page-protocol']!=='4'){
           this.lastSeen=0;
           this.compatibilityError=req.headers['x-clauderu-protocol']!=='4'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.4.1 на странице browser://extensions/ и обновите вкладку Claude.'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.4.2 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
           return json(426,{error:this.compatibilityError,requiredProtocol:4});
         }
@@ -36,12 +36,18 @@ export class ExtensionBridge {
         if(req.url==='/health')return json(200,{ok:true,protocol:4});
       }
       if (req.method === 'GET' && req.url === '/poll') {
-        this.lastSeen = Date.now();
-        const job = this.pending;
-        if (job && !job.delivered) { job.delivered = true; return json(200,{id:job.id,...job.payload}); }
-        // Keep requests shorter than MV3's fetch timeout, and allow regular heartbeats.
-        const timer = setTimeout(()=>json(200,{idle:true}), 15000);
-        res.on('close',()=>clearTimeout(timer));
+        let timer;
+        const cleanup=()=>{clearTimeout(timer);this.pollWaiters.delete(deliver);};
+        const deliver=()=>{
+          if(res.destroyed||res.writableEnded){cleanup();return false;}
+          const job=this.pending;
+          if(!job||job.delivered)return false;
+          job.delivered=true;cleanup();json(200,{id:job.id,...job.payload});return true;
+        };
+        if(deliver())return;
+        this.pollWaiters.add(deliver);
+        timer=setTimeout(()=>{cleanup();if(!res.destroyed&&!res.writableEnded)json(200,{idle:true});},1000);
+        res.on('close',cleanup);
         return;
       }
       if (req.method === 'POST' && req.url === '/event') {
@@ -78,6 +84,7 @@ export class ExtensionBridge {
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>this.finish(new Error('Нет завершённого ответа за 4 минуты. Проверьте вкладку Claude на Mac перед повторной отправкой.')),this.timeout);
       this.pending={id:randomBytes(16).toString('hex'),payload,...handlers,resolve,reject,timer,delivered:false};
+      for(const deliver of [...this.pollWaiters])deliver();
     });
   }
   async send({text,url,settings={},files=[],onUpdate,onFile,onWarning}) {

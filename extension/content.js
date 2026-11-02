@@ -155,16 +155,18 @@
         const findSend=()=>all('[data-testid="chat-input-send"]').find(visible)||all('button').find(b=>/^(send message|send|отправить сообщение|отправить)$/i.test(label(b)))||document.querySelector('button[data-testid="send-button"]');
         const send=await waitFor(()=>{const b=findSend();return b&&!b.disabled&&b.getAttribute('aria-disabled')!=='true'?b:null;},20000);
         send.click();
-        let previous='',stable=0,seenStop=false;
+        let previous='',unchangedSince=0,completedSince=0,seenStop=false;
         const deadline=Date.now()+165000;
         while(Date.now()<deadline){
-          await delay(800);
+          await delay(250);
           const list=responses(),text=list.length>before?messageText(list.at(-1)):'';
           const stopping=list.at(-1)?.getAttribute('data-is-streaming')==='true'||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)));
           if(stopping)seenStop=true;
-          if(text&&text!==previous){previous=text;stable=0;await chrome.runtime.sendMessage({type:'update',id:message.id,text,url:chatURL()});}
-          else if(text)stable++;
-          if(text&&!stopping&&stable>=(seenStop?4:12)){
+          if(text&&text!==previous){previous=text;unchangedSince=Date.now();await chrome.runtime.sendMessage({type:'update',id:message.id,text,url:chatURL()});}
+          const explicitlyDone=list.at(-1)?.getAttribute('data-is-streaming')==='false';
+          if(explicitlyDone&&!stopping){if(!completedSince)completedSince=Date.now();}else completedSince=0;
+          const settleMs=explicitlyDone?500:seenStop?1000:10000;
+          if(text&&!stopping&&Date.now()-unchangedSince>=settleMs&&(!explicitlyDone||Date.now()-completedSince>=settleMs)){
             const {files,warnings}=await collectFiles();
             for(const file of files){const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
             for(const warning of warnings)await chrome.runtime.sendMessage({type:'warning',id:message.id,warning});

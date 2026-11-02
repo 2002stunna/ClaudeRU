@@ -1,5 +1,7 @@
 const $=id=>document.getElementById(id);
 let chats=[],selected=null,operation=false,sending=null,catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
+let statusRequestInFlight=false;
+const messageNodes=new WeakMap();
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
 const current=()=>chats.find(c=>c.id===selected);
 const draft=()=>{if(!drafts.has(selected))drafts.set(selected,{text:'',files:[]});return drafts.get(selected);};
@@ -41,8 +43,15 @@ function renderSidebar(){
 function renderMessages(){
   const messages=$('messages');$('workspace').classList.toggle('is-empty',!current()?.messages.length&&current()?.loaded!==false);$('prompt').placeholder=current()?.messages.length?'Ответить…':'Чем я могу вам помочь сегодня?';const nearBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<150;messages.replaceChildren();const chat=current();
   if(!chat?.messages.length){const intro=document.createElement('div');intro.className='welcome';intro.textContent=chat?.loaded===false?'Загружаем разговор…':'';messages.append(intro);}
-  for(const m of chat?.messages||[]){const article=document.createElement('article');article.className=m.role;if(m.role==='assistant'){const mark=svg('spark');mark.classList.add('claude-mark');article.append(mark);}const label=document.createElement('b');label.textContent=m.role==='user'?'Вы':'Claude';const text=document.createElement('div');text.className='message-text';appendText(text,m.text||'');article.append(label,text);if(!m.text&&m.role==='assistant'&&!m.error){const wait=document.createElement('span');wait.className='typing';wait.textContent='Думает…';article.append(wait);}for(const file of m.files||[])article.append(fileCard(file));if(m.error){const error=document.createElement('p');error.className='message-error';error.textContent=m.error;article.append(error);}messages.append(article);}
+  for(const m of chat?.messages||[]){const article=document.createElement('article');article.className=m.role;messageNodes.set(m,article);if(m.role==='assistant'){const mark=svg('spark');mark.classList.add('claude-mark');article.append(mark);}const label=document.createElement('b');label.textContent=m.role==='user'?'Вы':'Claude';const text=document.createElement('div');text.className='message-text';appendText(text,m.text||'');article.append(label,text);if(!m.text&&m.role==='assistant'&&!m.error){const wait=document.createElement('span');wait.className='typing';wait.textContent='Думает…';article.append(wait);}for(const file of m.files||[])article.append(fileCard(file));if(m.error){const error=document.createElement('p');error.className='message-error';error.textContent=m.error;article.append(error);}messages.append(article);}
   if(nearBottom)messages.scrollTop=messages.scrollHeight;
+}
+function updateStreamingMessage(answer,event){
+  const article=messageNodes.get(answer);if(!article?.isConnected){renderMessages();return;}
+  const messages=$('messages'),atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<150;
+  if(event.type==='update'){const text=article.querySelector('.message-text');text.replaceChildren();appendText(text,answer.text);article.querySelector('.typing')?.remove();}
+  if(event.type==='file')article.append(fileCard(event.file));
+  if(atBottom)messages.scrollTop=messages.scrollHeight;
 }
 function renderOptions(){
   const settings=current()?.settings||{},model=settings.model||catalog?.current?.model||'',effort=settings.effort||catalog?.current?.effort||'';
@@ -136,7 +145,7 @@ $('chat-form').onsubmit=async e=>{
         if(event.type==='update'){answer.text=event.text;if(event.url)chat.url=event.url;}
         if(event.type==='file')answer.files.push(event.file);
         if(event.type==='done'){done=true;if(event.chat)upsert(event.chat);}
-        if(selected===chat.id){renderMessages();$('chat-title').textContent=current().title;}renderSidebar();
+        if(selected===chat.id){if(event.type==='done')renderMessages();else if(event.type==='update'||event.type==='file')updateStreamingMessage(answer,event);$('chat-title').textContent=current().title;}if(event.type==='done')renderSidebar();
       }
     }
     if(!done)throw Error('Соединение прервано. Проверьте чат на Mac перед повторной отправкой.');status(warnings.join(' '));
@@ -174,6 +183,6 @@ document.addEventListener('keydown',e=>{
   if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){const menu=document.activeElement?.closest('[role="menu"]');if(!menu)return;const buttons=[...menu.querySelectorAll('button:not(:disabled)')].filter(b=>b.getClientRects().length);if(!buttons.length)return;e.preventDefault();const i=buttons.indexOf(document.activeElement);const index=e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;buttons[index].focus();}
   if(e.key==='ArrowLeft'&&!$('model-menu').hidden){closeSubmenus();$('other-models-trigger').focus();}
 });
-async function bridgeStatus(){try{const r=await fetch('/api/bridge');if(!r.ok)return;const state=await r.json();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!sending){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&!catalog&&!operation&&!sending&&Date.now()-lastSyncAttempt>20000)await sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}}
-setInterval(bridgeStatus,10000);
+async function bridgeStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const r=await fetch('/api/bridge',{signal:AbortSignal.timeout(5000)});if(!r.ok)return;const state=await r.json();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!sending){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&!catalog&&!operation&&!sending&&Date.now()-lastSyncAttempt>20000)void sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}finally{statusRequestInFlight=false;}}
+setInterval(bridgeStatus,1000);
 fetch('/api/session').then(r=>r.json()).then(s=>{if(s.authenticated)showApp();}).catch(()=>{$('login-error').textContent='Нет связи с домашним Mac';});

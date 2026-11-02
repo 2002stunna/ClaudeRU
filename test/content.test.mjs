@@ -11,7 +11,7 @@ const html=await readFile(new URL('./fixtures/claude.html',import.meta.url),'utf
 async function fixture(t){
   const context=await browser.newContext();t.after(()=>context.close());
   await context.route('https://claude.ai/**',route=>route.fulfill({status:200,contentType:route.request().url().includes('/files/')?'text/csv':'text/html',body:route.request().url().includes('/files/')?'column\nvalue':html}));
-  await context.addInitScript(()=>{window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{window.events.push(event);return{ok:true};}}};});
+  await context.addInitScript(()=>{window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{window.events.push({...event,at:performance.now()});return{ok:true};}}};});
   const page=await context.newPage();await page.goto('https://claude.ai/chat/current-123');
   await page.addScriptTag({path:new URL('../extension/content.js',import.meta.url).pathname});
   const run=job=>page.evaluate(message=>new Promise(resolve=>window.extensionHandler({...message,type:'run',id:'test-job'},{id:'clauderu-test'},resolve)),job);
@@ -30,6 +30,7 @@ test('real DOM: select model and effort, upload bytes, forward answer and genera
   assert.equal(await page.locator('#upload').evaluate(n=>n.files[0].text()),'hello attachment');
   assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Проверь файл');
   const events=await page.evaluate(()=>window.events);assert.ok(events.some(e=>e.type==='update'));
+  const timing=await page.evaluate(()=>({submittedAt:window.submittedAt,finishedAt:performance.now()}));assert.ok(events.find(e=>e.type==='update').at-timing.submittedAt<1000,'first response update should arrive within one second');assert.ok(timing.finishedAt-timing.submittedAt<4000,'completed response should not incur the old multi-second idle delay');
   const files=events.filter(e=>e.type==='file').map(e=>e.file);
   assert.equal(files.length,2);assert.equal(files[0].name,'result.csv');assert.equal(Buffer.from(files[0].data,'base64').toString(),'column\nvalue');
   assert.equal(files[1].name,'code-1.py');assert.equal(Buffer.from(files[1].data,'base64').toString(),'print("hello")');
@@ -117,4 +118,26 @@ test('a rejected incompatible connection leaves the user message in the composer
   await page.locator('#prompt').fill('Не потеряй это сообщение');await page.locator('#send').click();await page.waitForFunction(()=>document.querySelector('#prompt').value==='Не потеряй это сообщение'&&!document.querySelector('#send').disabled);
   assert.equal(await page.locator('article').count(),0);assert.equal(sent,false);assert.match(await page.locator('#status').textContent(),/старая версия/);
   const histories=await page.evaluate(async()=>await(await fetch('/api/chats')).json());assert.ok(histories.chats.every(chat=>chat.messages.length===0));
+});
+test('connection status is fetched once per second without reloading the website',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
+  const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge:{status:{connected:false}}});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage(),polls=[];let navigations=0;
+  page.on('request',r=>{if(r.url().endsWith('/api/bridge'))polls.push(performance.now());if(r.isNavigationRequest())navigations++;});
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
+  await page.waitForTimeout(2400);assert.ok(polls.length>=3,'expected at least 3 status checks, got '+polls.length);assert.equal(navigations,1);
+  for(let i=1;i<polls.length;i++)assert.ok(polls[i]-polls[i-1]<1600,'status checks should be approximately one second apart');
+});
+test('streaming updates the active answer while preserving previous message nodes',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');let next,finish;
+  const nextPart=new Promise(r=>next=r),finished=new Promise(r=>finish=r);t.after(()=>{next();finish();});
+  const bridge={status:{connected:true},execute:async()=>({catalog:{models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}},chats:[]}),send:async job=>{job.onUpdate({text:'Первая часть',url:'https://claude.ai/chat/stream-test'});await nextPart;job.onUpdate({text:'Первая часть. Продолжение.',url:'https://claude.ai/chat/stream-test'});await finished;}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
+  await page.locator('#prompt').fill('Расскажи');await page.locator('#send').click();await page.getByText('Первая часть',{exact:true}).waitFor();
+  await page.evaluate(()=>window.previousMessageNode=document.querySelector('article.user'));next();
+  await page.getByText('Первая часть. Продолжение.',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.previousMessageNode===document.querySelector('article.user')),true);finish();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
 });

@@ -64,3 +64,25 @@ test('old extension or stale page cannot collect jobs and status explains how to
   const job=await(await call('/poll')).json();assert.equal(job.kind,'inspect');
   await call('/event',{id:job.id,type:'done',result:{chats:[]}});assert.deepEqual(await waiting,{chats:[]});
 });
+async function waitForPolls(bridge,count){
+  const until=Date.now()+1500;while(bridge.pollWaiters.size!==count&&Date.now()<until)await new Promise(r=>setTimeout(r,5));assert.equal(bridge.pollWaiters.size,count);
+}
+test('new job immediately wakes an idle poll and is delivered exactly once',async t=>{
+  const {bridge,call}=await fixture(t,3000);
+  const first=call('/poll').then(r=>r.json()),second=call('/poll').then(r=>r.json());
+  await waitForPolls(bridge,2);const start=performance.now();
+  const sending=bridge.execute({kind:'inspect'});
+  const early=await Promise.race([first,second]);assert.ok(early.id);assert.ok(performance.now()-start<500,'job must wake the poll without waiting for its idle timeout');
+  const packets=await Promise.all([first,second]);assert.equal(packets.filter(p=>p.id).length,1);assert.equal(packets.filter(p=>p.idle).length,1);
+  await call('/event',{id:early.id,type:'done',result:{chats:[]}});await sending;
+});
+test('an idle poll completes in about one second',async t=>{
+  const {call}=await fixture(t);const start=performance.now();const result=await(await call('/poll')).json();const elapsed=performance.now()-start;
+  assert.equal(result.idle,true);assert.ok(elapsed>=750&&elapsed<2000,'idle polling interval should be one second, measured '+elapsed+' ms');
+});
+test('a closed poll is removed before it can consume a new job',async t=>{
+  const {bridge,base,call}=await fixture(t);const controller=new AbortController();
+  const response=fetch(base+'/poll',{headers:{Origin:origin,Authorization:'Bearer '+bridge.token,'X-ClaudeRU-Protocol':'4','X-ClaudeRU-Page-Protocol':'4'},signal:controller.signal}).catch(e=>e);
+  await waitForPolls(bridge,1);controller.abort();await response;await waitForPolls(bridge,0);
+  const sending=bridge.execute({kind:'inspect'});const job=await(await call('/poll')).json();assert.equal(job.kind,'inspect');await call('/event',{id:job.id,type:'done'});await sending;
+});

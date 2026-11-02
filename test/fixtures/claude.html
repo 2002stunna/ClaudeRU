@@ -17,7 +17,7 @@ function refresh(){document.querySelector('#model-trigger').textContent=model+' 
 document.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>{model=b.dataset.model;refresh();close();});
 document.querySelectorAll('[data-effort]').forEach(b=>b.onclick=()=>{effort=b.dataset.effort;refresh();close();});
 document.querySelector('#upload').onchange=e=>{for(const file of e.target.files){const n=document.createElement('span');n.textContent=file.name;document.querySelector('#uploads').append(n);}};
-document.querySelector('#send').onclick=()=>{
+document.querySelector('#send').onclick=()=>{window.submittedAt=performance.now();
  const user=document.createElement('div');user.dataset.testid='user-message';user.textContent=document.querySelector('[contenteditable]').innerText;document.querySelector('#transcript').append(user);document.querySelector('[contenteditable]').innerText='';
  const response=document.createElement('div');response.dataset.testid='assistant-message';response.dataset.isStreaming='true';response.innerHTML='Готово: <a href="/files/result.csv" download="result.csv">result.csv</a><pre><code class="language-python">print("hello")</code></pre>';document.querySelector('#transcript').append(response);
  const stop=document.createElement('button');stop.setAttribute('aria-label','Stop response');document.body.append(stop);setTimeout(()=>{stop.remove();response.dataset.isStreaming='false';},1200);

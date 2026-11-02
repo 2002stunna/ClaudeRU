@@ -10,17 +10,23 @@ async function request(path,token,body,pageProtocol=0){
 }
 async function pageReadiness(tabId){try{return await chrome.tabs.sendMessage(tabId,{type:'ready'});}catch{return {ready:false,version:0};}}
 function chatURL(value){const u=new URL(value || 'https://claude.ai/new');if(u.origin!=='https://claude.ai'||!/^\/(new|chat\/[a-zA-Z0-9-]+)$/.test(u.pathname)||u.search||u.hash||u.username||u.password)throw Error('Неверный адрес чата');return u.href;}
+function samePage(current,target){
+  const from=new URL(current),to=new URL(target);
+  if(from.origin!==to.origin)return false;
+  const pathname=from.pathname.replace(/\/$/,'')||'/';
+  return pathname===to.pathname.replace(/\/$/,'')||(to.pathname==='/new'&&pathname==='/');
+}
 async function perform(job,config){
   const own={id:job.id,tabId:config.tabId,token:config.token};active=own;
   try{
     const tab=await chrome.tabs.get(config.tabId);
     if(new URL(tab.url).origin!=='https://claude.ai')throw Error('Выбранная вкладка больше не открыта на claude.ai. Переподключите её.');
     const target=job.kind==='inspect'?tab.url:chatURL(job.url);
-    if(job.kind!=='inspect'&&(tab.url!==target||!job.url))await chrome.tabs.update(config.tabId,{url:target});
+    if(job.kind!=='inspect'&&!samePage(tab.url,target))await chrome.tabs.update(config.tabId,{url:target});
     let started=false;
-    for(let i=0;i<40;i++){
-      await delay(500);
-      try{const state=await chrome.tabs.get(config.tabId);if(state.status!=='complete'||state.url!==target)continue;const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==4)throw Error('Обновите расширение и вкладку Claude до версии 0.4.1');started=true;break;}}catch(e){if(e.message?.includes('до версии'))throw e;}
+    for(let i=0;i<200;i++){
+      try{const state=await chrome.tabs.get(config.tabId);if(state.status==='complete'&&samePage(state.url,target)){const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==4)throw Error('Обновите расширение и вкладку Claude до версии 0.4.2');started=true;break;}}}catch(e){if(e.message?.includes('до версии'))throw e;}
+      await delay(100);
     }
     if(!started)throw Error('Вкладка не готова. Обновите её вручную и проверьте вход в Claude.');
     const result=await chrome.tabs.sendMessage(config.tabId,{...job,type:'run'});
@@ -43,7 +49,7 @@ async function loop(){
       const job=await request('/poll',config.token,undefined,ready.ready?(ready.version??0):0);
       await chrome.storage.local.set({lastStatus:'Домашний сервер подключён'});
       if(job.id){if(active){await request('/event',config.token,{id:job.id,type:'error',error:'Предыдущий запрос ещё выполняется во вкладке. Проверьте Claude на Mac.'});}else void perform(job,config);}
-    }catch(e){await chrome.storage.local.set({lastStatus:e.message});await delay(3000);}
+    }catch(e){await chrome.storage.local.set({lastStatus:e.message});await delay(1000);}
   }}finally{running=false;if(current!==generation)void loop();}
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
