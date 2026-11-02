@@ -120,7 +120,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           if(active)return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
           chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
         }catch(e){return json(400,{error:e.message});}
-        active=true;chat.settings=settings;
+        const previousTitle=chat.title,previousLoaded=chat.loaded;active=true;chat.settings=settings;
         if(!chat.customTitle&&!chat.messages.length&&body.text.trim())chat.title=body.text.slice(0,60);
         chat.messages.push({role:'user',text:body.text,files:files.map(({data,...meta})=>meta)});
         const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);chat.loaded=true;
@@ -135,7 +135,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           if(result?.url)chat.url=conversationURL(result.url);
           if(result?.title&&!chat.customTitle)chat.title=String(result.title).slice(0,160);
           await store.save(chat);write({type:'done',chat});
-        }catch(e){answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message});}
+        }catch(e){if(e.notSent===true){const index=chat.messages.indexOf(answer);if(index>=1)chat.messages.splice(index-1,2);chat.title=previousTitle;chat.loaded=previousLoaded;}else answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message,notSent:e.notSent===true});}
         finally{active=false;res.end();}return;
       }
       return json(404,{error:'Не найдено'});

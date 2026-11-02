@@ -140,7 +140,7 @@ $('chat-form').onsubmit=async e=>{
     const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='',done=false;
     while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;
       while((end=buffer.indexOf('\n'))>=0){const event=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);
-        if(event.type==='error')throw Error(event.error);
+        if(event.type==='error'){const error=Error(event.error);error.notSent=event.notSent===true;throw error;}
         if(event.type==='warning')warnings.push(event.warning);
         if(event.type==='update'){answer.text=event.text;if(event.url)chat.url=event.url;}
         if(event.type==='file')answer.files.push(event.file);

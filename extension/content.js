@@ -49,7 +49,7 @@
     if(settings.effort){
       await openModels();
       const effortMenu=choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)));
-      if(!effortMenu){await closeMenus();throw Error('У выбранной модели не найдено управление уровнем усилий. Выберите «Как в Claude» или другую модель.');}
+      if(!effortMenu){await closeMenus();throw Error('У выбранной модели не найдено управление уровнем усилий. Обновите меню усилий или выберите другую модель.');}
       if(effortValue(label(effortMenu))!==settings.effort){
         await submenu(/уровень усили|effort level|^effort\b/i);
         const item=choices().find(b=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(b))&&effortValue(label(b))===settings.effort);
@@ -76,21 +76,60 @@
     const current=snapshot();if(current.url&&!index.has(current.url))index.set(current.url,{title:current.title,url:current.url});
     return [...index.values()];
   }
+  const uploadInput=()=>composerRoot()?.querySelector('[data-testid="file-upload"],input[type="file"]');
+  function composerRoot(){
+    const box=editor();if(!box)return null;
+    const fieldset=box.closest('fieldset,form,[data-testid="composer"],[data-testid="chat-composer"]');if(fieldset)return fieldset;
+    let root=box.parentElement;
+    while(root&&root!==document.body){if(root.querySelector('input[type="file"]')&&root.querySelector('[data-testid="chat-input-send"],button[aria-label*="отправ" i],button[aria-label*="send" i]'))return root;root=root.parentElement;}
+    return box.parentElement;
+  }
+  const outsideTranscript=node=>!node.closest('[data-testid="user-message"],[data-testid="assistant-message"],[data-message-author-role],.font-claude-response');
+  function imagePreviews(root){return root?all('img',root).filter(n=>visible(n)&&outsideTranscript(n)&&!!n.getAttribute('src')):[];}
+  function uploadProblem(root){
+    const notice=all('[role="alert"],[data-testid*="upload-error"],[data-upload-state="error"]',root).find(n=>visible(n)&&outsideTranscript(n)&&/файл|загруз|вложен|file|upload|attachment/i.test(label(n)));
+    return notice?label(notice).slice(0,500):'';
+  }
+  function uploading(root){return all('[role="progressbar"],[aria-busy="true"],[data-testid*="upload-progress"],[data-upload-state="uploading"],[data-state="uploading"],.animate-spin',root).some(n=>visible(n)&&outsideTranscript(n));}
+  const normalized=text=>(text||'').replace(/\r\n/g,'\n').replace(/\u00a0/g,' ').normalize('NFC').trim();
+  function hasFilename(root,name){
+    const expected=normalized(name);
+    return all('[title],[aria-label],[alt],button,span,p,small',root).some(n=>visible(n)&&outsideTranscript(n)&&[n.getAttribute('title'),n.getAttribute('aria-label'),n.getAttribute('alt'),n.innerText].some(text=>typeof text==='string'&&normalized(text)===expected));
+  }
   async function attachFiles(files=[]){
-    if(!files.length)return;
+    if(!files.length)return null;
     if(files.length>5)throw Error('Можно прикрепить до 5 файлов');
-    let input=document.querySelector('[data-testid="file-upload"],input[type="file"]');
-    if(!input){
-      const add=all('button').find(b=>visible(b)&&/add files|attach|добавить файлы|прикрепить|добавить вложения/i.test(label(b)));
-      if(add){add.click();await delay(300);input=document.querySelector('[data-testid="file-upload"],input[type="file"]');}
-    }
+    let input=uploadInput();
+    if(!input){const add=all('button').find(b=>visible(b)&&/add files|attach|добавить файлы|прикрепить|добавить вложения/i.test(label(b)));if(add){add.click();await delay(150);input=uploadInput();}}
     if(!input)throw Error('В Claude не найдено поле загрузки файлов. Откройте меню «+» во вкладке на Mac и повторите.');
+    const root=composerRoot();if(!root)throw Error('Не найдено поле сообщения для вложений');
+    const existingPreviews=imagePreviews(root);
+    const existingCards=all('[data-testid="attachment"],[data-testid*="file-preview"],[data-testid*="file-thumbnail"]',root).filter(visible);
+    if(existingPreviews.length||existingCards.length||input.files?.length)throw Error('Во вкладке Claude остались неотправленные вложения. Сначала отправьте или уберите их вручную; повторно файл не загружался.');
+    const before=new Map(existingPreviews.map(img=>[img,img.getAttribute('src')]));
     const transfer=new DataTransfer();
     for(const file of files){const binary=atob(file.data);if(binary.length>20*1024*1024)throw Error('Файл больше 20 МБ');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));transfer.items.add(new File([bytes],file.name,{type:file.type||'application/octet-stream'}));}
-    input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
-    await waitFor(()=>files.every(file=>all('[title],[aria-label],button,span,p').some(n=>visible(n)&&(n.getAttribute('title')===file.name||n.getAttribute('aria-label')===file.name||n.innerText?.trim()===file.name))),20000);
-    await waitFor(()=>!all('[role="progressbar"],[data-testid*="upload-progress"]').some(visible),20000);
+    input.files=transfer.files;input.dispatchEvent(new Event('input',{bubbles:true,composed:true}));input.dispatchEvent(new Event('change',{bubbles:true,composed:true}));
+    return {files,before};
   }
+  function uploadsAccepted(upload,root){
+    if(!upload)return true;
+    const images=imagePreviews(root).filter(img=>!upload.before.has(img)||upload.before.get(img)!==img.getAttribute('src'));
+    const groups=new Set(images.map(img=>img.closest('[data-testid="attachment"],[data-testid*="file-preview"],[data-testid*="file-thumbnail"],button')||img));
+    const anonymousImages=upload.files.filter(file=>(/^image\//i.test(file.type||'')||/\.(png|jpe?g|gif|webp|avif|heic|bmp|svg)$/i.test(file.name))&&!hasFilename(root,file.name));
+    return upload.files.every(file=>hasFilename(root,file.name)||anonymousImages.includes(file))&&groups.size>=anonymousImages.length;
+  }
+  function insertOwnedText(text){
+    const input=editor();if(!input)return false;
+    const current=normalized(input.innerText);if(current&&current!==normalized(text))throw Error('Текст во вкладке Claude изменился. Отправка остановлена, чтобы сохранить черновик.');
+    if(current)return true;
+    input.focus();if(!document.execCommand('insertText',false,text))throw Error('Не удалось вставить текст в поле Claude.');
+    input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:text}));return true;
+  }
+  const findSend=()=>all('[data-testid="chat-input-send"]').find(visible)||all('button').find(b=>visible(b)&&/^(send message|send|отправить сообщение|отправить)$/i.test(label(b)));
+  const sendEnabled=button=>!!button&&button.isConnected&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'&&button.getAttribute('aria-busy')!=='true';
+  function userMessages(){return all('[data-testid="user-message"],[data-message-author-role="user"]').filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="user-message"],[data-message-author-role="user"]'));}
+  const turnKey=node=>node.getAttribute('data-message-id')||node.getAttribute('data-turn-key')||node.id||node;
   function base64(bytes){let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(text);}
   const textFile=(name,text)=>({name,type:'text/plain',data:base64(new TextEncoder().encode(text))});
   async function collectFiles(){
@@ -129,10 +168,11 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:4});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:5});return;}
     if(message.type!=='run')return;
     if(busy){respond({error:'Во вкладке уже выполняется запрос'});return;}busy=true;
     (async()=>{
+      let submissionAttempted=false;
       try{
         if(message.kind==='inspect'||message.kind==='options'){
           if(message.kind==='options')await applySettings(message.settings);
@@ -146,15 +186,33 @@
         let input=await waitFor(editor);
         if(input.innerText.trim())throw Error('Во вкладке есть неотправленный черновик. Отправьте или удалите его вручную.');
         await applySettings(message.settings);
-        await attachFiles(message.files);
-        input=await waitFor(editor);
-        if(input.innerText.trim())throw Error('Во вкладке появился черновик. Сообщение не отправлено.');
-        const before=responses().length;
-        input.focus();if(!document.execCommand('insertText',false,message.text||'Посмотри прикреплённые файлы.'))throw Error('Не удалось вставить текст в поле Claude.');
-        await delay(400);
-        const findSend=()=>all('[data-testid="chat-input-send"]').find(visible)||all('button').find(b=>/^(send message|send|отправить сообщение|отправить)$/i.test(label(b)))||document.querySelector('button[data-testid="send-button"]');
-        const send=await waitFor(()=>{const b=findSend();return b&&!b.disabled&&b.getAttribute('aria-disabled')!=='true'?b:null;},20000);
-        send.click();
+        const upload=await attachFiles(message.files);
+        const text=message.text||'Посмотри прикреплённые файлы.';
+        let textInsertions=0,readySince=0;
+        const prepareUntil=Date.now()+(upload?45000:20000);
+        let send=null;
+        while(Date.now()<prepareUntil){
+          const root=composerRoot(),box=editor();if(!root||!box){await delay(100);continue;}
+          const problem=uploadProblem(root);if(problem)throw Error('Claude не принял файл: '+problem);
+          if(!normalized(box.innerText)){
+            if(textInsertions>=3)throw Error('Claude несколько раз сбросил текст после загрузки файла. Черновик оставлен во вкладке; сообщение не отправлено.');
+            if(insertOwnedText(text))textInsertions++;
+          }else if(normalized(box.innerText)!==normalized(text))throw Error('Текст во вкладке Claude изменился. Черновик сохранён, отправка остановлена.');
+          const button=findSend();
+          if(uploadsAccepted(upload,root)&&!uploading(root)&&sendEnabled(button)&&normalized(editor()?.innerText)===normalized(text)){
+            if(!readySince)readySince=Date.now();
+            if(Date.now()-readySince>=400){send=button;break;}
+          }else readySince=0;
+          await delay(100);
+        }
+        if(!send)throw Error(upload?'Claude ещё обрабатывает файл или не разрешил отправку. Текст и вложения оставлены в черновике; сообщение не отправлено.':'Кнопка отправки не стала доступной. Текст оставлен в черновике Claude.');
+        const before=responses().length,beforeUsers=new Set(userMessages().map(turnKey)),beforeAnswers=new Set(responses().map(turnKey));
+        // One click only. A failed acknowledgement must never trigger a blind resend.
+        if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');
+        submissionAttempted=true;send.click();
+        try{
+          await waitFor(()=>userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before,10000);
+        }catch{throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}
         let previous='',unchangedSince=0,completedSince=0,seenStop=false;
         const deadline=Date.now()+165000;
         while(Date.now()<deadline){
@@ -174,7 +232,7 @@
           }
         }
         throw Error('Время ожидания истекло. Проверьте чат на Mac перед повторной отправкой.');
-      }catch(e){respond({error:e.message});}finally{busy=false;}
+      }catch(e){respond({error:e.message,notSent:!submissionAttempted});}finally{busy=false;}
     })();return true;
   });
 })();

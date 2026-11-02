@@ -25,15 +25,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='4'||req.headers['x-clauderu-page-protocol']!=='4'){
+        if(req.headers['x-clauderu-protocol']!=='5'||req.headers['x-clauderu-page-protocol']!=='5'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='4'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.4.2 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='5'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.4.3 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:4});
+          return json(426,{error:this.compatibilityError,requiredProtocol:5});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:4});
+        if(req.url==='/health')return json(200,{ok:true,protocol:5});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -63,7 +63,7 @@ export class ExtensionBridge {
             await job.onFile(event.file);
           } else if (event.type === 'warning') { job.onWarning?.(String(event.warning).slice(0,1000));
           } else if (event.type === 'done') { this.finish(null,event.result); }
-          else if (event.type === 'error') { this.finish(new Error(String(event.error || 'Ошибка расширения').slice(0,1000))); }
+          else if (event.type === 'error') { const error=new Error(String(event.error || 'Ошибка расширения').slice(0,1000));error.notSent=event.notSent===true;this.finish(error); }
           else return json(400,{error:'Invalid event'});
           return json(200,{ok:true});
         } catch { return json(400,{error:'Invalid event'}); }

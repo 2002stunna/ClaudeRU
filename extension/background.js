@@ -3,7 +3,7 @@ let running=false, active=null, generation=0;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 chrome.storage.local.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'});
 async function request(path,token,body,pageProtocol=0){
-  const res=await fetch(BASE+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'X-ClaudeRU-Protocol':'4','X-ClaudeRU-Page-Protocol':String(pageProtocol),'X-ClaudeRU-Version':chrome.runtime.getManifest().version,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(22000)});
+  const res=await fetch(BASE+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'X-ClaudeRU-Protocol':'5','X-ClaudeRU-Page-Protocol':String(pageProtocol),'X-ClaudeRU-Version':chrome.runtime.getManifest().version,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(22000)});
   const data=await res.json().catch(()=>({}));
   if(!res.ok)throw Error(res.status===401?'Код подключения неверен. Переподключите расширение.':res.status===404&&path==='/health'?'Обновите и перезапустите сервер ClaudeRU на Mac.':data.error||'Ошибка домашнего сервера: '+res.status);
   return data;
@@ -17,7 +17,7 @@ function samePage(current,target){
   return pathname===to.pathname.replace(/\/$/,'')||(to.pathname==='/new'&&pathname==='/');
 }
 async function perform(job,config){
-  const own={id:job.id,tabId:config.tabId,token:config.token};active=own;
+  const own={id:job.id,tabId:config.tabId,token:config.token};active=own;let jobDispatched=false;
   try{
     const tab=await chrome.tabs.get(config.tabId);
     if(new URL(tab.url).origin!=='https://claude.ai')throw Error('Выбранная вкладка больше не открыта на claude.ai. Переподключите её.');
@@ -25,15 +25,16 @@ async function perform(job,config){
     if(job.kind!=='inspect'&&!samePage(tab.url,target))await chrome.tabs.update(config.tabId,{url:target});
     let started=false;
     for(let i=0;i<200;i++){
-      try{const state=await chrome.tabs.get(config.tabId);if(state.status==='complete'&&samePage(state.url,target)){const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==4)throw Error('Обновите расширение и вкладку Claude до версии 0.4.2');started=true;break;}}}catch(e){if(e.message?.includes('до версии'))throw e;}
+      try{const state=await chrome.tabs.get(config.tabId);if(state.status==='complete'&&samePage(state.url,target)){const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==5)throw Error('Обновите расширение и вкладку Claude до версии 0.4.3');started=true;break;}}}catch(e){if(e.message?.includes('до версии'))throw e;}
       await delay(100);
     }
     if(!started)throw Error('Вкладка не готова. Обновите её вручную и проверьте вход в Claude.');
+    jobDispatched=true;
     const result=await chrome.tabs.sendMessage(config.tabId,{...job,type:'run'});
-    if(result?.error)throw Error(result.error);
+    if(result?.error){const error=Error(result.error);error.notSent=result.notSent===true;throw error;}
     if(!result?.done)throw Error('Вкладка прервала выполнение');
     await request('/event',config.token,{id:job.id,type:'done',result:result.result});
-  }catch(e){try{await request('/event',config.token,{id:job.id,type:'error',error:e.message});}catch{}}
+  }catch(e){try{await request('/event',config.token,{id:job.id,type:'error',error:e.message,notSent:e.notSent===true||!jobDispatched});}catch{}}
   finally{if(active===own)active=null;}
 }
 async function loop(){
@@ -68,7 +69,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
         const tab=await chrome.tabs.get(message.tabId);
         if(!tab.url||new URL(tab.url).origin!=='https://claude.ai')throw Error('Откройте вкладку claude.ai и подключите её.');
         const ready=await pageReadiness(message.tabId);
-        if(!ready.ready||ready.version!==4)throw Error('Обновите вкладку Claude: её код устарел или не загружен. Затем подключите её заново.');
+        if(!ready.ready||ready.version!==5)throw Error('Обновите вкладку Claude: её код устарел или не загружен. Затем подключите её заново.');
         await request('/health',message.token,undefined,ready.version);
         await chrome.storage.local.set({token:message.token,tabId:message.tabId,lastStatus:'Связь с вкладкой Claude установлена'});
         generation++;void loop();respond({ok:true});

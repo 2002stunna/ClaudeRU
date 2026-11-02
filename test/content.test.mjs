@@ -27,7 +27,7 @@ test('real DOM: select model and effort, upload bytes, forward answer and genera
   const {page,run}=await fixture(t);
   const result=await run({kind:'chat',text:'Проверь файл',settings:{model:'Sonnet 5.5',effort:'high'},files:[{name:'remote.txt',type:'text/plain',data:Buffer.from('hello attachment').toString('base64')}]});
   assert.equal(result.done,true,result.error);assert.equal(await page.locator('#model-trigger').innerText(),'Sonnet 5.5 Высокий');
-  assert.equal(await page.locator('#upload').evaluate(n=>n.files[0].text()),'hello attachment');
+  assert.equal(await page.evaluate(()=>window.submittedFiles[0].text()),'hello attachment');
   assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Проверь файл');
   const events=await page.evaluate(()=>window.events);assert.ok(events.some(e=>e.type==='update'));
   const timing=await page.evaluate(()=>({submittedAt:window.submittedAt,finishedAt:performance.now()}));assert.ok(events.find(e=>e.type==='update').at-timing.submittedAt<1000,'first response update should arrive within one second');assert.ok(timing.finishedAt-timing.submittedAt<4000,'completed response should not incur the old multi-second idle delay');
@@ -140,4 +140,52 @@ test('streaming updates the active answer while preserving previous message node
   await page.locator('#prompt').fill('Расскажи');await page.locator('#send').click();await page.getByText('Первая часть',{exact:true}).waitFor();
   await page.evaluate(()=>window.previousMessageNode=document.querySelector('article.user'));next();
   await page.getByText('Первая часть. Продолжение.',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.previousMessageNode===document.querySelector('article.user')),true);finish();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
+});
+const tinyPNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKz8AAAAASUVORK5CYII=';
+test('thumbnail-only image uploads are submitted once after processing and editor remount',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{
+    const upload=document.querySelector('#upload'),send=document.querySelector('#send'),original=send.onclick;
+    window.sendCount=0;send.onclick=()=>{window.sendCount++;window.clickWhileUploading=!!document.querySelector('[role="progressbar"]');original();};
+    upload.onchange=event=>{
+      const image=document.createElement('img');image.src=URL.createObjectURL(event.target.files[0]);image.width=96;image.height=96;
+      document.querySelector('#uploads').replaceChildren(image);
+      const progress=document.createElement('div');progress.setAttribute('role','progressbar');progress.textContent='Обработка';document.querySelector('#uploads').append(progress);send.disabled=true;
+      setTimeout(()=>{const old=document.querySelector('[contenteditable]'),replacement=old.cloneNode(false);old.replaceWith(replacement);progress.remove();send.disabled=false;window.processingFinished=true;},900);
+    };
+  });
+  const result=await run({kind:'chat',text:'',files:[{name:'карта.png',type:'image/png',data:tinyPNG}]});
+  assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sendCount),1);assert.equal(await page.evaluate(()=>window.clickWhileUploading),false);
+  assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Посмотри прикреплённые файлы.');
+  assert.equal(await page.evaluate(()=>window.submittedFiles[0].name),'карта.png');
+  assert.equal(await page.evaluate(()=>window.processingFinished),true);
+});
+test('a file rejected during processing stays in draft and is never submitted',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{window.sendCount=0;document.querySelector('#send').onclick=()=>window.sendCount++;document.querySelector('#upload').onchange=()=>{const error=document.createElement('div');error.setAttribute('role','alert');error.textContent='Не удалось загрузить файл';document.querySelector('#uploads').append(error);};});
+  const result=await run({kind:'chat',text:'Изучи файл',files:[{name:'image.png',type:'image/png',data:tinyPNG}]});
+  assert.match(result.error,/не принял файл/);assert.equal(result.notSent,true);assert.equal(await page.evaluate(()=>window.sendCount),0);
+});
+test('existing image attachment is preserved without uploading it again',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(data=>{window.changeCount=0;document.querySelector('#upload').onchange=()=>window.changeCount++;const img=document.createElement('img');img.src='data:image/png;base64,'+data;img.width=80;img.height=80;document.querySelector('#uploads').append(img);},tinyPNG);
+  const result=await run({kind:'chat',text:'Проверь',files:[{name:'image.png',type:'image/png',data:tinyPNG}]});
+  assert.match(result.error,/остались неотправленные вложения/);assert.equal(result.notSent,true);assert.equal(await page.evaluate(()=>window.changeCount),0);assert.equal(await page.locator('#uploads img').count(),1);
+});
+test('a click without a new conversation turn is reported without clicking send twice',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{window.clicks=0;document.querySelector('#send').onclick=()=>window.clicks++;});
+  const result=await run({kind:'chat',text:'Сообщение'});
+  assert.match(result.error,/не подтвердил отправку/);assert.equal(result.notSent,false);assert.equal(await page.evaluate(()=>window.clicks),1);assert.equal(await page.locator('[contenteditable]').innerText(),'Сообщение');
+});
+test('an upload failure reported by the extension restores the website text and file draft',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
+  const bridge={status:{connected:true},execute:async()=>({catalog:{models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}},chats:[]}),send:async()=>{const error=Error('Claude не принял файл');error.notSent=true;throw error;}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});await page.locator('#model-label').filter({hasText:'Sonnet 5.5'}).waitFor();
+  await page.locator('#file-input').setInputFiles({name:'image.png',mimeType:'image/png',buffer:Buffer.from(tinyPNG,'base64')});await page.locator('#attachments strong').filter({hasText:'image.png'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#attach').disabled);
+  await page.locator('#prompt').fill('Проверь изображение');await page.locator('#send').click();await page.waitForFunction(()=>document.querySelector('#prompt').value==='Проверь изображение'&&document.querySelectorAll('#attachments .file-card').length===1&&!document.querySelector('#model-toggle').disabled);
+  assert.equal(await page.locator('article').count(),0);assert.match(await page.locator('#status').textContent(),/не принял файл/);const data=await page.evaluate(async()=>await(await fetch('/api/chats')).json());assert.equal(data.chats[0].messages.length,0);
 });

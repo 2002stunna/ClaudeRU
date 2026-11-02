@@ -24,7 +24,7 @@ async function app(t){
   const state={settings:null,files:null};
   const bridge={status:{connected:true},
     execute:async job=>job.kind==='open'?{snapshot:{url:job.url,title:'Старый чат',messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:{models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}},chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
-    send:async job=>{state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',url:'https://claude.ai/chat/new-456'});await job.onFile({name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')});return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
+    send:async job=>{if(job.text==='Отклонить до отправки'){const error=Error('Ошибка обработки вложения');error.notSent=true;throw error;}state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',url:'https://claude.ai/chat/new-456'});await job.onFile({name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')});return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
   const auth={salt:'test',hash:scryptSync('test-password','test',64).toString('hex')};
   const server=createApp({auth,bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const base=`http://127.0.0.1:${server.address().port}`;let cookie='';
@@ -55,4 +55,7 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
   const renamed=await(await post('/api/chats/metadata',{id:chat.id,title:'Своё название',pinned:true})).json();assert.equal(renamed.chat.pinned,true);
   const refreshed=await(await post('/api/chats/open',{id:chat.id})).json();assert.equal(refreshed.chat.title,'Своё название');
   assert.equal((await post('/api/chats/metadata',{id:chat.id,title:''})).status,400);
+  const beforeFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);
+  const failed=await post('/api/chat',{chatId:chat.id,text:'Отклонить до отправки',fileIds:[file.id]});const failure=JSON.parse((await failed.text()).trim());assert.equal(failure.type,'error');assert.equal(failure.notSent,true);
+  const afterFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);assert.equal(afterFailure.messages.length,beforeFailure.messages.length);assert.equal(afterFailure.title,beforeFailure.title);
 });
