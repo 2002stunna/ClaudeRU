@@ -25,7 +25,7 @@ export class ExtensionBridge {
       if (req.method === 'GET' && req.url === '/poll') {
         this.lastSeen = Date.now();
         const job = this.pending;
-        if (job && !job.delivered) { job.delivered = true; return json(200,{id:job.id,text:job.text,url:job.url}); }
+        if (job && !job.delivered) { job.delivered = true; return json(200,{id:job.id,...job.payload}); }
         // Keep requests shorter than MV3's fetch timeout, and allow regular heartbeats.
         const timer = setTimeout(()=>json(200,{idle:true}), 15000);
         res.on('close',()=>clearTimeout(timer));
@@ -33,13 +33,17 @@ export class ExtensionBridge {
       }
       if (req.method === 'POST' && req.url === '/event') {
         try {
-          let raw=''; for await (const chunk of req) { raw+=chunk; if(Buffer.byteLength(raw)>2_000_000) return json(413,{error:'Too large'}); }
-          const event = JSON.parse(raw), job = this.pending;
+          let size=0; const chunks=[]; for await (const chunk of req) { size+=chunk.length; if(size>36_000_000) return json(413,{error:'Too large'});chunks.push(chunk); }
+          const event = JSON.parse(Buffer.concat(chunks).toString('utf8')), job = this.pending;
           if (!job || event.id !== job.id) return json(409,{error:'Задание уже завершено'});
           if (event.type === 'update') {
             if(typeof event.text!=='string') return json(400,{error:'Invalid text'});
-            job.onUpdate({text:event.text,url:event.url ? conversationURL(event.url) : null});
-          } else if (event.type === 'done') { this.finish(); }
+            job.onUpdate?.({text:event.text,url:event.url ? conversationURL(event.url) : null});
+          } else if (event.type === 'file') {
+            if(!job.onFile)return json(400,{error:'Files not accepted'});
+            await job.onFile(event.file);
+          } else if (event.type === 'warning') { job.onWarning?.(String(event.warning).slice(0,1000));
+          } else if (event.type === 'done') { this.finish(null,event.result); }
           else if (event.type === 'error') { this.finish(new Error(String(event.error || 'Ошибка расширения').slice(0,1000))); }
           else return json(400,{error:'Invalid event'});
           return json(200,{ok:true});
@@ -49,19 +53,22 @@ export class ExtensionBridge {
     });
     await new Promise((resolve,reject)=>{this.server.once('error',reject);this.server.listen(port,'127.0.0.1',resolve);});
   }
-  finish(error) {
+  finish(error,result) {
     const job=this.pending;if(!job)return;
     clearTimeout(job.timer);this.pending=null;
-    if(error)job.reject(error);else job.resolve();
+    if(error)job.reject(error);else job.resolve(result);
   }
-  async send({text,url,onUpdate}) {
+  async execute(payload, handlers={}) {
     if(this.pending)throw Error('Уже выполняется запрос');
     if(!this.status.connected)throw Error('Расширение не подключено. Откройте вкладку Claude на Mac и подключите её через значок ClaudeRU.');
-    conversationURL(url);
+    if(payload.url)conversationURL(payload.url);
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>this.finish(new Error('Нет завершённого ответа за 4 минуты. Проверьте вкладку Claude на Mac перед повторной отправкой.')),this.timeout);
-      this.pending={id:randomBytes(16).toString('hex'),text,url,onUpdate,resolve,reject,timer,delivered:false};
+      this.pending={id:randomBytes(16).toString('hex'),payload,...handlers,resolve,reject,timer,delivered:false};
     });
+  }
+  async send({text,url,settings={},files=[],onUpdate,onFile,onWarning}) {
+    return this.execute({kind:'chat',text,url,settings,files},{onUpdate,onFile,onWarning});
   }
   async close() {
     this.finish(new Error('Сервер остановлен'));

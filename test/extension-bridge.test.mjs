@@ -36,3 +36,18 @@ test('extension failure and timeout reach caller without automatic resubmission'
   await assert.rejects(bridge.send({text:'test',onUpdate:()=>{}}),/Проверьте вкладку/);
   assert.equal(bridge.pending,null);
 });
+test('inspection result and generated file events cross the authenticated extension transport',async t=>{
+  const {bridge,call}=await fixture(t);bridge.lastSeen=Date.now();
+  const inspect=bridge.execute({kind:'inspect'});
+  let job=await(await call('/poll')).json();assert.equal(job.kind,'inspect');
+  const result={catalog:{models:['Sonnet 5.5']},chats:[]};
+  await call('/event',{id:job.id,type:'done',result});assert.deepEqual(await inspect,result);
+  const files=[],warnings=[];
+  const sending=bridge.send({text:'hello',settings:{model:'Sonnet 5.5',effort:'high'},files:[],onFile:async file=>files.push(file),onWarning:w=>warnings.push(w)});
+  job=await(await call('/poll')).json();assert.equal(job.settings.effort,'high');
+  const file={name:'résumé.txt',type:'text/plain',data:'aGk='};
+  assert.equal((await call('/event',{id:job.id,type:'file',file})).status,200);
+  await call('/event',{id:job.id,type:'warning',warning:'one file unavailable'});
+  await call('/event',{id:job.id,type:'done'});await sending;
+  assert.deepEqual(files,[file]);assert.deepEqual(warnings,['one file unavailable']);
+});

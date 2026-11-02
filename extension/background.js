@@ -13,18 +13,18 @@ async function perform(job,config){
   try{
     const tab=await chrome.tabs.get(config.tabId);
     if(new URL(tab.url).origin!=='https://claude.ai')throw Error('Выбранная вкладка больше не открыта на claude.ai. Переподключите её.');
-    const target=chatURL(job.url);
-    if(tab.url!==target || !job.url)await chrome.tabs.update(config.tabId,{url:target});
+    const target=job.kind==='inspect'?tab.url:chatURL(job.url);
+    if(job.kind!=='inspect'&&(tab.url!==target||!job.url))await chrome.tabs.update(config.tabId,{url:target});
     let started=false;
     for(let i=0;i<40;i++){
       await delay(500);
-      try{const state=await chrome.tabs.get(config.tabId);if(state.status!=='complete'||state.url!==target)continue;const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){started=true;break;}}catch{}
+      try{const state=await chrome.tabs.get(config.tabId);if(state.status!=='complete'||state.url!==target)continue;const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==3)throw Error('Обновите расширение и вкладку Claude до версии 0.3.0');started=true;break;}}catch(e){if(e.message?.includes('до версии'))throw e;}
     }
     if(!started)throw Error('Вкладка не готова. Обновите её вручную и проверьте вход в Claude.');
-    const result=await chrome.tabs.sendMessage(config.tabId,{type:'run',id:job.id,text:job.text});
+    const result=await chrome.tabs.sendMessage(config.tabId,{...job,type:'run'});
     if(result?.error)throw Error(result.error);
     if(!result?.done)throw Error('Вкладка прервала выполнение');
-    await request('/event',config.token,{id:job.id,type:'done'});
+    await request('/event',config.token,{id:job.id,type:'done',result:result.result});
   }catch(e){try{await request('/event',config.token,{id:job.id,type:'error',error:e.message});}catch{}}
   finally{if(active===own)active=null;}
 }
@@ -44,8 +44,8 @@ async function loop(){
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.tab){
-    if(message.type==='update'&&active&&sender.tab.id===active.tabId&&message.id===active.id){
-      request('/event',active.token,{id:active.id,type:'update',text:message.text,url:message.url}).then(()=>respond({ok:true}),()=>respond({ok:false}));return true;
+    if(['update','file','warning'].includes(message.type)&&active&&sender.tab.id===active.tabId&&message.id===active.id){
+      request('/event',active.token,{id:active.id,type:message.type,...(message.type==='update'?{text:message.text,url:message.url}:message.type==='file'?{file:message.file}:{warning:message.warning})}).then(()=>respond({ok:true}),()=>respond({ok:false}));return true;
     }
     return;
   }

@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Документы — Claude</title></head><body>
+<aside><a href="/chat/current-123">Документы</a><a href="/chat/previous-456">Предыдущий разговор</a></aside>
+<main><div id="transcript"></div><div contenteditable="true" role="textbox"></div><input id="upload" type="file" multiple><div id="uploads"></div><button id="send" aria-label="Send message">Send</button>
+<button id="model-trigger">Fable 5.1 Средний</button>
+<div id="root-menu" role="menu" hidden><button role="menuitemradio" data-model="Fable 5.1">Fable 5.1</button><button id="effort-menu-trigger" role="menuitem">Уровень усилий Средний</button><button id="other-trigger" role="menuitem">Другие модели</button></div>
+<div id="other-menu" role="menu" hidden><button role="menuitemradio" data-model="Sonnet 5.5">Sonnet 5.5</button><button role="menuitemradio" data-model="Haiku 5.5">Haiku 5.5</button></div>
+<div id="effort-menu" role="menu" hidden><button role="menuitemradio" data-effort="Низкий">Низкий</button><button role="menuitemradio" data-effort="Средний">Средний Рекомендуется</button><button role="menuitemradio" data-effort="Высокий">Высокий</button><button role="menuitemradio" data-effort="Сверхвысокий">Сверхвысокий</button><button role="menuitemradio" data-effort="Максимальный">Максимальный</button></div>
+</main>
+<script>
+let model='Fable 5.1',effort='Средний';
+function close(){document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=true);}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')close();});
+document.querySelector('#model-trigger').onclick=()=>document.querySelector('#root-menu').hidden=false;
+document.querySelector('#other-trigger').onclick=()=>document.querySelector('#other-menu').hidden=false;
+document.querySelector('#effort-menu-trigger').onclick=()=>document.querySelector('#effort-menu').hidden=false;
+function refresh(){document.querySelector('#model-trigger').textContent=model+' '+effort;document.querySelector('#effort-menu-trigger').textContent='Уровень усилий '+effort;}
+document.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>{model=b.dataset.model;refresh();close();});
+document.querySelectorAll('[data-effort]').forEach(b=>b.onclick=()=>{effort=b.dataset.effort;refresh();close();});
+document.querySelector('#upload').onchange=e=>{for(const file of e.target.files){const n=document.createElement('span');n.textContent=file.name;document.querySelector('#uploads').append(n);}};
+document.querySelector('#send').onclick=()=>{
+ const user=document.createElement('div');user.dataset.testid='user-message';user.textContent=document.querySelector('[contenteditable]').innerText;document.querySelector('#transcript').append(user);document.querySelector('[contenteditable]').innerText='';
+ const response=document.createElement('div');response.className='font-claude-response';response.innerHTML='Готово: <a href="/files/result.csv" download="result.csv">result.csv</a><pre><code class="language-python">print("hello")</code></pre>';document.querySelector('#transcript').append(response);
+ const stop=document.createElement('button');stop.setAttribute('aria-label','Stop response');document.body.append(stop);setTimeout(()=>stop.remove(),1200);
+};
+</script></body></html>

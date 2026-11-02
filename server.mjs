@@ -4,75 +4,146 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ClaudeBridge, conversationURL } from './bridge.mjs';
 import { ExtensionBridge } from './extension-bridge.mjs';
+import { DataStore, chatOptions, MAX_FILES, MAX_TOTAL } from './data-store.mjs';
 
-export function createApp({ auth, bridge, secure = false }) {
-  const sessions = new Map();
-  let failures = [], active = false;
+export function createApp({ auth, bridge, secure = false, store = new DataStore() }) {
+  const sessions = new Map();let failures = [], active = false;
   const assets = {'/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
+  async function applySnapshot(chat,snapshot) {
+    if(!snapshot||typeof snapshot!=='object')throw Error('Расширение не вернуло содержимое чата');
+    if(snapshot.url)chat.url=conversationURL(snapshot.url);
+    if(typeof snapshot.title==='string'&&snapshot.title.trim())chat.title=snapshot.title.slice(0,160);
+    if(Array.isArray(snapshot.messages)) {
+      const messages=[];
+      for(const message of snapshot.messages.slice(0,2000)){
+        if(!['user','assistant'].includes(message?.role)||typeof message.text!=='string')continue;
+        const files=[];
+        for(const file of (Array.isArray(message.files)?message.files:[]).slice(0,MAX_FILES))files.push(await store.putFile(file));
+        const prior=chat.messages.find(m=>m.role===message.role&&m.text===message.text);
+        if(!files.length&&prior?.files?.length)files.push(...prior.files);
+        messages.push({role:message.role,text:message.text.slice(0,500000),files});
+      }
+      if(messages.length)chat.messages=messages;
+    }
+    chat.loaded=true;await store.save(chat);return chat;
+  }
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Cache-Control','no-store');
-    res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Referrer-Policy','no-referrer');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const json = (code, value) => { res.writeHead(code, {'Content-Type':'application/json'}); res.end(JSON.stringify(value)); };
     const cookie = /(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
-    const now = Date.now();
-    for (const [key, expiry] of sessions) if (expiry < now) sessions.delete(key);
+    const now = Date.now();for (const [key, expiry] of sessions) if (expiry < now) sessions.delete(key);
     const authorized = cookie && sessions.has(cookie);
     try {
       if (req.method === 'GET' && assets[req.url]) {
-        const [name, type] = assets[req.url];
-        res.setHeader('Content-Type',type); res.end(await readFile(new URL('./public/'+name,import.meta.url))); return;
+        const [name, type] = assets[req.url];res.setHeader('Content-Type',type);res.end(await readFile(new URL('./public/'+name,import.meta.url)));return;
       }
-      if (req.method === 'GET' && req.url === '/api/session') return json(200,{authenticated:!!authorized});
-      if (req.method === 'GET' && req.url === '/api/bridge') return authorized ? json(200,bridge.status || {mode:'browser',connected:true}) : json(401,{error:'Войдите в систему'});
-      if (req.method !== 'POST') return json(404,{error:'Не найдено'});
-      // Require a same-origin browser request, including login (prevents login CSRF).
-      const origin = req.headers.origin;
-      const expected = `${secure ? 'https' : 'http'}://${req.headers.host}`;
-      if (origin !== expected || req.headers['content-type'] !== 'application/json') return json(403,{error:'Недопустимый источник запроса'});
-      if (req.url !== '/api/login' && !authorized) return json(401,{error:'Войдите в систему'});
-      let raw = '';
-      for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 64000) return json(413,{error:'Сообщение слишком большое'}); }
-      let body; try { body = JSON.parse(raw); } catch { return json(400,{error:'Некорректный JSON'}); }
-      if (req.url === '/api/login') {
-        failures = failures.filter(t => now-t < 15*60*1000);
-        if (failures.length >= 10) return json(429,{error:'Слишком много попыток. Подождите 15 минут.'});
-        if (typeof body.password !== 'string' || body.password.length > 1024) return json(400,{error:'Некорректный пароль'});
-        const actual = scryptSync(body.password,auth.salt,64);
-        if (!timingSafeEqual(actual,Buffer.from(auth.hash,'hex'))) { failures.push(now); return json(401,{error:'Неверный пароль'}); }
-        const token = randomBytes(32).toString('hex'); sessions.set(token,now+12*60*60*1000);
-        res.setHeader('Set-Cookie',`session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure ? '; Secure' : ''}`);
-        return json(200,{ok:true});
+      if(req.method==='GET'){
+        if(req.url==='/api/session')return json(200,{authenticated:!!authorized});
+        if(!authorized)return json(401,{error:'Войдите в систему'});
+        if(req.url==='/api/bridge')return json(200,{...(bridge.status||{mode:'browser',connected:true}),busy:active});
+        if(req.url==='/api/chats')return json(200,{chats:await store.list()});
+        const fileMatch=/^\/api\/files\/([a-f0-9]{32})$/.exec(req.url);
+        if(fileMatch){
+          try { const {meta,bytes}=await store.readFile(fileMatch[1]);res.writeHead(200,{'Content-Type':meta.type,'Content-Disposition':`attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(meta.name.toWellFormed())}`,'Content-Length':bytes.length});res.end(bytes); }
+          catch{return json(404,{error:'Файл не найден'});}return;
+        }
+        return json(404,{error:'Не найдено'});
       }
-      if (req.url === '/api/logout') {
-        sessions.delete(cookie); res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return json(200,{ok:true});
+      if(req.method!=='POST')return json(404,{error:'Не найдено'});
+      const expected=`${secure?'https':'http'}://${req.headers.host}`;
+      if(req.headers.origin!==expected || req.headers['content-type']!=='application/json')return json(403,{error:'Недопустимый источник запроса'});
+      if(req.url!=='/api/login'&&!authorized)return json(401,{error:'Войдите в систему'});
+      const limit=req.url==='/api/uploads'?30_000_000:req.url==='/api/login'?16000:2_000_000;
+      const chunks=[];let size=0;
+      for await(const chunk of req){size+=chunk.length;if(size>limit)return json(413,{error:'Превышен допустимый размер запроса'});chunks.push(chunk);}
+      let body;try{body=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!body||typeof body!=='object'||Array.isArray(body))throw Error();}catch{return json(400,{error:'Некорректный JSON'});}
+      if(req.url==='/api/login'){
+        failures=failures.filter(t=>now-t<15*60*1000);
+        if(failures.length>=10)return json(429,{error:'Слишком много попыток. Подождите 15 минут.'});
+        if(typeof body.password!=='string'||body.password.length>1024)return json(400,{error:'Некорректный пароль'});
+        if(!timingSafeEqual(scryptSync(body.password,auth.salt,64),Buffer.from(auth.hash,'hex'))){failures.push(now);return json(401,{error:'Неверный пароль'});}
+        const token=randomBytes(32).toString('hex');sessions.set(token,now+12*60*60*1000);
+        res.setHeader('Set-Cookie',`session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure?'; Secure':''}`);return json(200,{ok:true});
       }
-      if (req.url === '/api/chat') {
-        if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 20000) return json(400,{error:'Введите сообщение до 20 000 символов'});
-        try { conversationURL(body.url); } catch { return json(400,{error:'Некорректный адрес чата'}); }
-        if (active) return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
-        active = true;
+      if(req.url==='/api/logout'){sessions.delete(cookie);res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return json(200,{ok:true});}
+      if(req.url==='/api/uploads'){
+        try{return json(200,{file:await store.putFile(body)});}catch(e){return json(400,{error:e.message});}
+      }
+      if(req.url==='/api/chats/new'){
+        try{return json(200,{chat:await store.create({settings:chatOptions(body.settings)})});}catch(e){return json(400,{error:e.message});}
+      }
+      if(req.url==='/api/chats/import'){
+        if(!Array.isArray(body.chats))return json(400,{error:'Некорректная история'});
+        for(const c of body.chats.slice(0,200)){
+          try{if(!c||typeof c.title!=='string')continue;await store.create({title:c.title,url:c.url||null,messages:(Array.isArray(c.messages)?c.messages:[]).filter(m=>['user','assistant'].includes(m?.role)&&typeof m.text==='string').slice(0,1000).map(m=>({role:m.role,text:m.text.slice(0,100000),files:[]})),settings:chatOptions(c.settings)});}catch{}
+        }return json(200,{chats:await store.list()});
+      }
+      if(req.url==='/api/chats/settings'){
+        try{const chat=await store.get(body.id);chat.settings=chatOptions(body.settings);await store.save(chat);return json(200,{chat});}catch(e){return json(400,{error:e.message});}
+      }
+      if(req.url==='/api/options'){
+        if(active)return json(409,{error:'Дождитесь завершения текущего ответа'});
+        if(!bridge.execute)return json(400,{error:'Обновите расширение ClaudeRU'});
+        active=true;
+        try{const chat=await store.get(body.id);const settings=chatOptions(body.settings);const result=await bridge.execute({kind:'options',url:chat.url,settings:{model:settings.model}});if(!result?.catalog)throw Error('Не получен список настроек Claude');chat.settings=settings;await store.save(chat);return json(200,{catalog:result.catalog,chat});}
+        catch(e){return json(400,{error:e.message});}finally{active=false;}
+      }
+      if(req.url==='/api/sync'||req.url==='/api/chats/open'){
+        if(active)return json(409,{error:'Дождитесь завершения текущего ответа'});
+        if(!bridge.execute)return json(400,{error:'Эта функция требует нового расширения ClaudeRU'});
+        active=true;
+        try {
+          if(req.url==='/api/sync'){
+            const result=await bridge.execute({kind:'inspect'});
+            if(!result||!Array.isArray(result.chats))throw Error('Обновите расширение ClaudeRU и вкладку Claude');
+            await store.importIndex(result.chats);
+            if(result.snapshot?.url){const chat=await store.create({url:result.snapshot.url,title:result.snapshot.title});await applySnapshot(chat,result.snapshot);}
+            return json(200,{chats:await store.list(),catalog:result.catalog});
+          }
+          const chat=await store.get(body.id);if(!chat.url)throw Error('У нового чата ещё нет адреса в Claude');
+          const result=await bridge.execute({kind:'open',url:chat.url});await applySnapshot(chat,result?.snapshot);
+          return json(200,{chat,warnings:result.warnings||[]});
+        }catch(e){return json(400,{error:e.message});}finally{active=false;}
+      }
+      if(req.url==='/api/chat'){
+        let settings,files,chat;
+        try{
+          if(typeof body.text!=='string'||body.text.length>20000||(!body.text.trim()&&!(body.fileIds?.length)))throw Error('Введите сообщение до 20 000 символов или добавьте файл');
+          if(body.url)conversationURL(body.url);
+          settings=chatOptions(body.settings);files=await store.wireFiles(body.fileIds);
+          if(!bridge.execute&&(files.length||settings.model||settings.effort))throw Error('Настройки и файлы поддерживаются в режиме расширения. Запустите сервер без BRIDGE_MODE=browser.');
+          if(active)return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
+          chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
+        }catch(e){return json(400,{error:e.message});}
+        active=true;chat.settings=settings;
+        if(!chat.messages.length&&body.text.trim())chat.title=body.text.slice(0,60);
+        chat.messages.push({role:'user',text:body.text,files:files.map(({data,...meta})=>meta)});
+        const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);chat.loaded=true;
+        try{await store.save(chat);}catch{active=false;return json(500,{error:'Не удалось сохранить историю на Mac'});}
         res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','X-Accel-Buffering':'no'});
-        const write = data => { if (!res.destroyed) res.write(JSON.stringify(data)+'\n'); };
-        try { await bridge.send({text:body.text,url:body.url,onUpdate:data=>write({type:'update',...data})}); write({type:'done'}); }
-        catch (e) { write({type:'error',error:e.message}); }
-        finally { active = false; res.end(); }
-        return;
+        const write=data=>{if(!res.destroyed)res.write(JSON.stringify(data)+'\n');};let generatedSize=0;
+        try{
+          const result=await bridge.send({text:body.text,url:chat.url,settings,files,
+            onUpdate:data=>{answer.text=data.text;if(data.url)chat.url=conversationURL(data.url);write({type:'update',...data});},
+            onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});},
+            onWarning:warning=>write({type:'warning',warning})});
+          if(result?.url)chat.url=conversationURL(result.url);
+          if(result?.title)chat.title=String(result.title).slice(0,160);
+          await store.save(chat);write({type:'done',chat});
+        }catch(e){answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message});}
+        finally{active=false;res.end();}return;
       }
       return json(404,{error:'Не найдено'});
-    } catch { if (!res.headersSent) json(500,{error:'Ошибка сервера. Проверьте терминал на Mac.'}); else res.end(); }
-  });
-  return server;
+    }catch{if(!res.headersSent)json(500,{error:'Ошибка сервера. Проверьте терминал на Mac.'});else res.end();}
+  });return server;
 }
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  let auth;
-  try { auth = JSON.parse(await readFile('.local/auth.json','utf8')); }
-  catch { console.error('Сначала выполните npm run setup'); process.exit(1); }
-  const bridge = process.env.BRIDGE_MODE === 'browser' ? new ClaudeBridge() : new ExtensionBridge();
-  await bridge.open();
-  if (bridge instanceof ExtensionBridge) console.log('Код подключения расширения (вставьте только в расширение на своём Mac):\n'+bridge.token);
-  const server = createApp({auth,bridge,secure:process.env.COOKIE_SECURE === '1'});
-  server.listen(Number(process.env.PORT || 3000),'127.0.0.1',()=>console.log('ClaudeRU запущен на порту '+(process.env.PORT || 3000)+'. Для внешнего доступа используйте HTTPS-туннель.'));
-  for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{ server.close(); await bridge.close(); process.exit(0); });
+if(process.argv[1]===fileURLToPath(import.meta.url)){
+  let auth;try{auth=JSON.parse(await readFile('.local/auth.json','utf8'));}catch{console.error('Сначала выполните npm run setup');process.exit(1);}
+  const store=new DataStore('.local');await store.ready;
+  const bridge=process.env.BRIDGE_MODE==='browser'?new ClaudeBridge():new ExtensionBridge();await bridge.open();
+  if(bridge instanceof ExtensionBridge)console.log('Код подключения расширения (вставьте только в расширение на своём Mac):\n'+bridge.token);
+  const server=createApp({auth,bridge,store,secure:process.env.COOKIE_SECURE==='1'});
+  server.listen(Number(process.env.PORT||3000),'127.0.0.1',()=>console.log('ClaudeRU запущен на порту '+(process.env.PORT||3000)+'. Для внешнего доступа используйте HTTPS-туннель.'));
+  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{server.close();await bridge.close();process.exit(0);});
 }
