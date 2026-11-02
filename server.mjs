@@ -12,7 +12,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
   async function applySnapshot(chat,snapshot) {
     if(!snapshot||typeof snapshot!=='object')throw Error('Расширение не вернуло содержимое чата');
     if(snapshot.url)chat.url=conversationURL(snapshot.url);
-    if(typeof snapshot.title==='string'&&snapshot.title.trim())chat.title=snapshot.title.slice(0,160);
+    if(!chat.customTitle&&typeof snapshot.title==='string'&&snapshot.title.trim())chat.title=snapshot.title.slice(0,160);
     if(Array.isArray(snapshot.messages)) {
       const messages=[];
       for(const message of snapshot.messages.slice(0,2000)){
@@ -79,6 +79,9 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           try{if(!c||typeof c.title!=='string')continue;await store.create({title:c.title,url:c.url||null,messages:(Array.isArray(c.messages)?c.messages:[]).filter(m=>['user','assistant'].includes(m?.role)&&typeof m.text==='string').slice(0,1000).map(m=>({role:m.role,text:m.text.slice(0,100000),files:[]})),settings:chatOptions(c.settings)});}catch{}
         }return json(200,{chats:await store.list()});
       }
+      if(req.url==='/api/chats/metadata'){
+        try{const chat=await store.get(body.id);if(body.title!==undefined){if(typeof body.title!=='string'||!body.title.trim()||body.title.length>160)throw Error('Введите название до 160 символов');chat.title=body.title.trim();chat.customTitle=true;}if(body.pinned!==undefined){if(typeof body.pinned!=='boolean')throw Error('Некорректная настройка закрепления');chat.pinned=body.pinned;}await store.save(chat);return json(200,{chat});}catch(e){return json(400,{error:e.message});}
+      }
       if(req.url==='/api/chats/settings'){
         try{const chat=await store.get(body.id);chat.settings=chatOptions(body.settings);await store.save(chat);return json(200,{chat});}catch(e){return json(400,{error:e.message});}
       }
@@ -117,7 +120,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
         }catch(e){return json(400,{error:e.message});}
         active=true;chat.settings=settings;
-        if(!chat.messages.length&&body.text.trim())chat.title=body.text.slice(0,60);
+        if(!chat.customTitle&&!chat.messages.length&&body.text.trim())chat.title=body.text.slice(0,60);
         chat.messages.push({role:'user',text:body.text,files:files.map(({data,...meta})=>meta)});
         const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);chat.loaded=true;
         try{await store.save(chat);}catch{active=false;return json(500,{error:'Не удалось сохранить историю на Mac'});}
@@ -129,7 +132,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
             onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});},
             onWarning:warning=>write({type:'warning',warning})});
           if(result?.url)chat.url=conversationURL(result.url);
-          if(result?.title)chat.title=String(result.title).slice(0,160);
+          if(result?.title&&!chat.customTitle)chat.title=String(result.title).slice(0,160);
           await store.save(chat);write({type:'done',chat});
         }catch(e){answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message});}
         finally{active=false;res.end();}return;

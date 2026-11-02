@@ -21,7 +21,7 @@ test('real DOM: inspect models, effort levels and sidebar without sending a mess
   const {page,run}=await fixture(t);const reply=await run({kind:'inspect'});
   assert.equal(reply.done,true);assert.deepEqual(reply.result.catalog.models,['Fable 5.1','Sonnet 5.5','Haiku 5.5']);
   assert.deepEqual(reply.result.catalog.efforts,['low','medium','high','xhigh','max']);
-  assert.equal(reply.result.chats.length,2);assert.equal(await page.locator('.font-claude-response').count(),0);
+  assert.equal(reply.result.chats.length,2);assert.equal(await page.locator('[data-testid="assistant-message"]').count(),0);
 });
 test('real DOM: select model and effort, upload bytes, forward answer and generated files',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);
@@ -54,19 +54,25 @@ test('web interface: sync sidebar, choose settings, upload, download and safely 
   const context=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});t.after(()=>context.close());const page=await context.newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
-  await page.locator('#sync').click();await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();
-  await page.locator('#model').selectOption('Sonnet 5.5');await page.waitForFunction(()=>!document.querySelector('#effort').disabled);
-  await page.locator('#effort').selectOption('high');await page.waitForFunction(()=>!document.querySelector('#send').disabled);
-  await page.locator('#file-input').setInputFiles({name:'input.txt',mimeType:'text/plain',buffer:Buffer.from('input data')});await page.locator('#attachments strong').filter({hasText:'input.txt'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#send').disabled);
+  await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();
+  assert.equal(await page.locator('select').count(),0);assert.ok(!(await page.locator('#model-toggle').textContent()).includes('Как в Claude'));
+  await page.screenshot({path:'/tmp/clauderu-template-empty.png'});
+  await page.locator('#model-toggle').click();await page.locator('#other-models-trigger').click();await page.locator('#model-submenu [data-model="Sonnet 5.5"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
+  await page.locator('#model-toggle').click();await page.locator('#effort-menu-trigger').click();await page.screenshot({path:'/tmp/clauderu-template-model-menu.png'});await page.locator('#effort-options [data-effort="high"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
+  await page.locator('#file-input').setInputFiles({name:'input.txt',mimeType:'text/plain',buffer:Buffer.from('input data')});await page.locator('#attachments strong').filter({hasText:'input.txt'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#attach').disabled);
   await page.locator('#prompt').fill('Создай документ');await page.locator('#send').click();await page.locator('article.assistant .file-card strong').filter({hasText:'result.html'}).waitFor();
   await page.locator('article.assistant .file-card button').click();await page.locator('#file-preview').waitFor({state:'visible'});assert.equal(await page.locator('#preview-text').textContent(),generated);assert.equal(await page.evaluate(()=>window.untrustedExecuted),undefined);await page.locator('#close-preview').click();
   const promise=page.waitForEvent('download');await page.locator('article.assistant .file-card a').click();const download=await promise;assert.equal(await readFile(await download.path(),'utf8'),generated);
-  await page.screenshot({path:'/tmp/clauderu-workspace-desktop.png'});
+  await page.screenshot({path:'/tmp/clauderu-template-desktop.png'});
   await page.locator('#chats button').filter({hasText:'Старый разговор'}).click();await page.getByText('Сохранённый ответ',{exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});await page.locator('#toggle-sidebar').click();assert.ok(await page.locator('#sidebar').evaluate(n=>n.classList.contains('open')));await page.locator('#chats button').filter({hasText:'Готовый документ'}).click();await page.locator('article.assistant .file-card').waitFor();
-  assert.equal(await page.locator('#model').inputValue(),'Sonnet 5.5');assert.equal(await page.locator('#effort').inputValue(),'high');
+  assert.equal(await page.locator('#model-label').textContent(),'Sonnet 5.5');assert.equal(await page.locator('#effort-label').textContent(),'Высокий');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
-  await page.screenshot({path:'/tmp/clauderu-workspace-mobile.png'});assert.deepEqual(errors,[]);
+  await page.screenshot({path:'/tmp/clauderu-template-mobile.png'});
+  await page.locator('#chat-title-button').click();await page.locator('#rename-chat').click();await page.locator('#rename-title').fill('Мой документ');await page.locator('#rename-form button[type=submit]').click();await page.locator('#chat-title').filter({hasText:'Мой документ'}).waitFor();
+  await page.locator('#chat-title-button').click();await page.locator('#pin-chat').click();await page.locator('#toggle-sidebar').click();await page.locator('#pinned-chats button').filter({hasText:'Мой документ'}).waitFor();await page.locator('#collapse-sidebar').click();
+  await page.locator('#toggle-sidebar').click();await page.locator('#show-files').click();await page.locator('#files-library').waitFor({state:'visible'});assert.equal(await page.locator('#files-library .file-card').count(),1);await page.locator('#close-files').click();
+  assert.deepEqual(errors,[]);
 });
 test('real DOM: missing effort option prevents sending instead of silently using another setting',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);await page.locator('[data-effort="Максимальный"]').evaluate(n=>n.remove());
@@ -81,4 +87,23 @@ test('real DOM: generated download keeps the original filename from response hea
   const result=await run({kind:'open'});assert.equal(result.done,true,result.error);
   assert.equal(result.result.snapshot.messages.at(-1).files[0].name,'отчёт.csv');
   assert.equal(Buffer.from(result.result.snapshot.messages.at(-1).files[0].data,'base64').toString(),'a,b');
+});
+test('model menu reports a disconnected bridge instead of offering a fake default option',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
+  const bridge={status:{connected:false},execute:async()=>{throw Error('Расширение не подключено');}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
+  await page.locator('#model-toggle').click();await page.locator('#catalog-error').waitFor({state:'visible'});assert.match(await page.locator('#catalog-error').textContent(),/не подключено/);
+  await page.locator('#other-models-trigger').click();assert.equal(await page.locator('#model-submenu [role=menuitemradio]').count(),0);assert.equal(await page.locator('select').count(),0);
+});
+test('template stale frames are ignored and catalog discovery waits for the active composer',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{
+    const stale=document.createElement('section');stale.hidden=true;stale.innerHTML='<button data-testid="model-selector-dropdown">Opus 999</button><div data-testid="assistant-message">stale private response</div><div data-testid="user-message">stale private question</div><div data-testid="chat-input" contenteditable="true">stale draft</div>';
+    document.querySelector('main').prepend(stale);
+    const button=document.querySelector('#model-trigger');const parent=button.parentElement;button.remove();setTimeout(()=>parent.append(button),500);
+  });
+  const inspected=await run({kind:'inspect'});assert.equal(inspected.done,true,inspected.error);assert.equal(inspected.result.catalog.current.model,'Fable 5.1');assert.equal(inspected.result.snapshot.messages.length,0);assert.ok(!JSON.stringify(inspected).includes('stale private'));
 });

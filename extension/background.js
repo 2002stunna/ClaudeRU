@@ -18,7 +18,7 @@ async function perform(job,config){
     let started=false;
     for(let i=0;i<40;i++){
       await delay(500);
-      try{const state=await chrome.tabs.get(config.tabId);if(state.status!=='complete'||state.url!==target)continue;const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==3)throw Error('Обновите расширение и вкладку Claude до версии 0.3.0');started=true;break;}}catch(e){if(e.message?.includes('до версии'))throw e;}
+      try{const state=await chrome.tabs.get(config.tabId);if(state.status!=='complete'||state.url!==target)continue;const ready=await chrome.tabs.sendMessage(config.tabId,{type:'ready'});if(ready?.ready){if(ready.version!==4)throw Error('Обновите расширение и вкладку Claude до версии 0.4.0');started=true;break;}}catch(e){if(e.message?.includes('до версии'))throw e;}
     }
     if(!started)throw Error('Вкладка не готова. Обновите её вручную и проверьте вход в Claude.');
     const result=await chrome.tabs.sendMessage(config.tabId,{...job,type:'run'});

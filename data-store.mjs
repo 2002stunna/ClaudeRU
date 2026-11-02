@@ -54,7 +54,7 @@ export class DataStore {
   async save(chat){chat.updatedAt=Date.now();await this.persist();return chat;}
   async importIndex(index){
     if(!Array.isArray(index))return;
-    for(const item of index.slice(0,300)){
+    for(const item of index.slice(0,300).reverse()){
       if(!item || typeof item.title!=='string')continue;
       try{await this.create({title:item.title,url:conversationURL(item.url)});}catch{}
     }

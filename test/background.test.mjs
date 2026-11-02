@@ -18,7 +18,7 @@ test('background carries full job and file events between selected tab and authe
   const chrome={
     storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},
     tabs:{get:async()=>({url:job.url,status:'complete'}),update:async(...args)=>navigation.push(args),sendMessage:async(tabId,message)=>{
-      assert.equal(tabId,7);if(message.type==='ready')return {ready:true,version:3};jobs.push(message);
+      assert.equal(tabId,7);if(message.type==='ready')return {ready:true,version:4};jobs.push(message);
       await new Promise(resolve=>handler({type:'file',id:job.id,file:{name:'output.txt',data:'aGk='}},{tab:{id:7}},ack=>{assert.equal(ack.ok,true);resolve();}));
       return {done:true,result:{url:job.url,title:'Done'}};
     }},

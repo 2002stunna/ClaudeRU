@@ -52,4 +52,7 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
   const history=await(await get('/api/chats')).json();const stored=history.chats.find(c=>c.id===chat.id);
   assert.equal(stored.title,'Разговор с файлом');assert.equal(stored.messages[0].files[0].id,file.id);assert.equal(stored.messages[1].files[0].id,generated.id);
   assert.equal((await post('/api/chat',{chatId:chat.id,text:'bad',settings:{effort:'invalid'}})).status,400);
+  const renamed=await(await post('/api/chats/metadata',{id:chat.id,title:'Своё название',pinned:true})).json();assert.equal(renamed.chat.pinned,true);
+  const refreshed=await(await post('/api/chats/open',{id:chat.id})).json();assert.equal(refreshed.chat.title,'Своё название');
+  assert.equal((await post('/api/chats/metadata',{id:chat.id,title:''})).status,400);
 });
