@@ -4,7 +4,7 @@ import { launchBrowser } from './browser.mjs';
 export function conversationURL(value) {
   if (!value) return 'https://claude.ai/new';
   const url = new URL(value);
-  if (url.origin !== 'https://claude.ai' || !/^\/chat\/[a-zA-Z0-9-]+$/.test(url.pathname) || url.search || url.hash)
+  if (url.origin !== 'https://claude.ai' || !/^\/chat\/[a-zA-Z0-9-]+$/.test(url.pathname) || url.search || url.hash || url.username || url.password)
     throw new Error('Недопустимый адрес чата');
   return url.href;
 }

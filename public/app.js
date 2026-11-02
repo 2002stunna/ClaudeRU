@@ -38,3 +38,6 @@ $('chat-form').onsubmit=async e=>{
   finally { busy=false;$('send').disabled=false;save(); }
 };
 fetch('/api/session').then(r=>r.json()).then(s=>{if(s.authenticated)showApp();}).catch(()=>{$('login-error').textContent='Нет связи с домашним Mac';});
+
+async function bridgeStatus(){try{const r=await fetch('/api/bridge');if(!r.ok)return;const s=await r.json();document.querySelector('.badge').textContent=s.connected?'Mac подключён':'Подключите расширение на Mac';}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}}
+setInterval(bridgeStatus,10000);void bridgeStatus();

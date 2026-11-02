@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ClaudeBridge, conversationURL } from './bridge.mjs';
+import { ExtensionBridge } from './extension-bridge.mjs';
 
 export function createApp({ auth, bridge, secure = false }) {
   const sessions = new Map();
@@ -24,6 +25,7 @@ export function createApp({ auth, bridge, secure = false }) {
         res.setHeader('Content-Type',type); res.end(await readFile(new URL('./public/'+name,import.meta.url))); return;
       }
       if (req.method === 'GET' && req.url === '/api/session') return json(200,{authenticated:!!authorized});
+      if (req.method === 'GET' && req.url === '/api/bridge') return authorized ? json(200,bridge.status || {mode:'browser',connected:true}) : json(401,{error:'Войдите в систему'});
       if (req.method !== 'POST') return json(404,{error:'Не найдено'});
       // Require a same-origin browser request, including login (prevents login CSRF).
       const origin = req.headers.origin;
@@ -67,8 +69,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let auth;
   try { auth = JSON.parse(await readFile('.local/auth.json','utf8')); }
   catch { console.error('Сначала выполните npm run setup'); process.exit(1); }
-  const bridge = new ClaudeBridge();
+  const bridge = process.env.BRIDGE_MODE === 'browser' ? new ClaudeBridge() : new ExtensionBridge();
   await bridge.open();
+  if (bridge instanceof ExtensionBridge) console.log('Код подключения расширения (вставьте только в расширение на своём Mac):\n'+bridge.token);
   const server = createApp({auth,bridge,secure:process.env.COOKIE_SECURE === '1'});
   server.listen(Number(process.env.PORT || 3000),'127.0.0.1',()=>console.log('ClaudeRU запущен на порту '+(process.env.PORT || 3000)+'. Для внешнего доступа используйте HTTPS-туннель.'));
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{ server.close(); await bridge.close(); process.exit(0); });
