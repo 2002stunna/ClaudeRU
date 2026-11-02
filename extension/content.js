@@ -1,6 +1,6 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
-  let busy=false;
+  let busy=false, cachedCatalog=null;
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const all=(selector,root=document)=>[...root.querySelectorAll(selector)];
   const label=node=>{const text=(node?.innerText||node?.textContent||'').replace(/[\uE000-\uF8FF]/g,'').trim();return text||node?.getAttribute('aria-label')||'';};
@@ -17,14 +17,14 @@
   const effortValue=text=>effortNames.find(([,pattern])=>pattern.test(text))?.[0]||'';
   const choices=()=>all('[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[data-radix-collection-item],button').filter(visible);
   const modelButton=()=>all('[data-testid="model-selector-dropdown"]').find(visible)||all('button,[role="button"]').filter(visible).find(b=>!b.closest('[role="menu"],[role="listbox"]') && modelName(label(b)));
-  const waitFor=async(fn,timeout=12000)=>{const end=Date.now()+timeout;do{const found=fn();if(found)return found;await delay(150);}while(Date.now()<end);throw Error('Элемент интерфейса Claude не появился. Проверьте вкладку на Mac.');};
-  async function closeMenus(){for(let i=0;i<2;i++){(document.activeElement||document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));await delay(100);}}
+  const waitFor=async(fn,timeout=12000)=>{const end=Date.now()+timeout;do{const found=fn();if(found)return found;await delay(50);}while(Date.now()<end);throw Error('Элемент интерфейса Claude не появился. Проверьте вкладку на Mac.');};
+  async function closeMenus(){for(let i=0;i<2;i++){(document.activeElement||document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));await delay(25);}}
   async function openModels(){await closeMenus();const button=modelButton();if(!button)throw Error('Не найдено меню модели в Claude. Обновите вкладку на Mac.');button.click();await waitFor(()=>choices().some(n=>n!==button&&n.closest('[role="menu"],[role="listbox"]')),5000);return button;}
-  async function submenu(pattern){const item=choices().find(b=>pattern.test(label(b)));if(!item)return false;const previous=new Set(choices());item.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerType:'mouse'}));item.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));item.click();await waitFor(()=>item.getAttribute('aria-expanded')==='true'||choices().some(n=>!previous.has(n)),5000);return true;}
+  async function submenu(pattern){const item=choices().find(b=>pattern.test(label(b)));if(!item||item.disabled||item.getAttribute('aria-disabled')==='true')return false;const previous=new Set(choices());item.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerType:'mouse'}));item.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));await delay(60);if(item.getAttribute('aria-expanded')!=='true'&&!choices().some(n=>!previous.has(n)))item.click();await waitFor(()=>item.getAttribute('aria-expanded')==='true'||choices().some(n=>!previous.has(n)),5000);return true;}
   const menuModels=()=>[...new Set(choices().filter(b=>b!==modelButton()).map(b=>modelName(label(b))).filter(Boolean))];
   async function inspectCatalog(){
     let trigger=modelButton();if(!trigger){try{trigger=await waitFor(modelButton,8000);}catch{}}if(!trigger)return {models:[],efforts:[],current:{model:'',effort:''},warning:'Меню модели не найдено. Проверьте вход в Claude.'};
-    const current={model:modelName(label(trigger)||trigger.getAttribute('aria-label')||''),effort:effortValue(label(trigger))};
+    const current=readState();
     const models=new Set([current.model]);let efforts=[],warning='';
     try{
       await openModels();menuModels().forEach(m=>models.add(m));const selected=choices().find(b=>b!==trigger&&same(modelName(label(b)),current.model));if(selected){const description=label(selected).replace(current.model,'').trim();if(description)current.description=description.slice(0,200);}
@@ -34,7 +34,7 @@
         efforts=[...new Set(choices().map(b=>{const text=label(b);return /^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(text)?effortValue(text):'';}).filter(Boolean))];
       }
     }catch(e){warning='Не удалось полностью прочитать меню Claude: '+e.message;}finally{await closeMenus();}
-    return {models:[...models].filter(Boolean),efforts,current,...(warning?{warning}:{})};
+    cachedCatalog={models:[...models].filter(Boolean),efforts,current:{...current,...readState()},...(warning?{warning}:{})};return cachedCatalog;
   }
   async function applySettings(settings={}){
     if(settings.model && !same(modelName(label(modelButton())),settings.model)){
@@ -43,10 +43,10 @@
       if(!item){await submenu(/другие модели|other models|more models/i);item=choices().find(b=>same(modelName(label(b)),settings.model));}
       if(!item){await closeMenus();throw Error('Модель «'+settings.model+'» не найдена в вашем Claude. Обновите список моделей.');}
       if(item.getAttribute('aria-disabled')==='true'||item.disabled)throw Error('Эта модель сейчас недоступна в Claude');
-      item.click();await delay(350);await closeMenus();
-      if(!same(modelName(label(modelButton())),settings.model))throw Error('Claude не подтвердил смену модели. Сообщение не отправлено.');
+      item.click();await waitFor(()=>same(readState().model,settings.model),2500);await closeMenus();
+      await openModels();let efforts=[];if(await submenu(/уровень усили|effort level|^effort\b/i))efforts=[...new Set(choices().filter(n=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(n))).map(n=>effortValue(label(n))).filter(Boolean))];cachedCatalog={...quickCatalog(),efforts};await closeMenus();
     }
-    if(settings.effort){
+    if(settings.effort && readState().effort!==settings.effort){
       await openModels();
       const effortMenu=choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)));
       if(!effortMenu){await closeMenus();throw Error('У выбранной модели не найдено управление уровнем усилий. Обновите меню усилий или выберите другую модель.');}
@@ -54,25 +54,76 @@
         await submenu(/уровень усили|effort level|^effort\b/i);
         const item=choices().find(b=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(b))&&effortValue(label(b))===settings.effort);
         if(!item||item.getAttribute('aria-disabled')==='true'||item.disabled){await closeMenus();throw Error('Этот уровень усилий недоступен у выбранной модели.');}
-        item.click();await delay(250);
+        item.click();await delay(50);
       }
-      await closeMenus();await openModels();
+      await closeMenus();if(readState().effort===settings.effort)return;await openModels();
       const confirmed=effortValue(label(choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)))))||effortValue(label(modelButton()));
       await closeMenus();if(confirmed!==settings.effort)throw Error('Claude не подтвердил уровень усилий. Сообщение не отправлено.');
     }
   }
   function chatURL(){return /^\/chat\/[a-zA-Z0-9-]+$/.test(location.pathname)?location.origin+location.pathname:null;}
+  function readState(){
+    const trigger=modelButton(),text=(trigger?.getAttribute('aria-label')||'')+' '+label(trigger);
+    const roots=all('[data-testid="hub-composer-notices"],[data-testid="notice-region-slot-shift"],#notice-region-slot-shift,[role="alert"],[role="status"]');
+    const composer=composerRoot();if(composer)roots.push(...all('p,span,div',composer).filter(n=>outsideTranscript(n)&&!n.querySelector('[data-testid="user-message"],[data-testid="assistant-message"],[data-message-author-role],.font-claude-response')));
+    const notice=roots.filter(n=>visible(n)&&outsideTranscript(n)).map(label).find(t=>/закончил[а-я]* (?:кредиты|лимит)|лимит.{0,50}(?:исчерпан|достигнут|законч)|(?:usage|message|rate) limit|out of (?:credits|usage)|(?:credits|usage).{0,30}(?:exhausted|reached)|смените модель.{0,30}продолж|switch models? to continue|you.{0,10}(?:ve|have) reached.{0,40}limit|limit reached|недостаточно кредитов/i.test(t));
+    return {model:modelName(text),effort:effortValue(text),blocked:notice?notice.slice(0,1500):'',streaming:responses().some(n=>n.getAttribute('data-is-streaming')==='true')||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)))};
+  }
+  function requireAvailable(){const state=readState();if(state.blocked){const error=Error(state.blocked);error.state=state;throw error;}}
+  function quickCatalog(){return {...(cachedCatalog||{models:[],efforts:[]}),current:readState()};}
+  async function openChatMenu(){
+    await closeMenus();const url=chatURL();
+    const link=all('a[href]').find(a=>{try{return new URL(a.href).origin+new URL(a.href).pathname===url;}catch{return false;}});
+    let root=link,button;
+    for(let i=0;root&&i<5;i++,root=root.parentElement){
+      button=all('button,[role="button"]',root).find(b=>/more|дополн|действ|меню|options|ellipsis/i.test((b.getAttribute('aria-label')||'')+' '+(b.getAttribute('data-testid')||''))||b.getAttribute('aria-haspopup')==='menu'||/^(⋯|…|\.\.\.)$/.test(label(b)));
+      if(button)break;
+    }
+    if(!button){const header=document.querySelector('[data-testid="chat-header"]');button=header&&all('button',header).find(b=>b.getAttribute('aria-haspopup')==='menu');}
+    if(!button)throw Error('Не найдено меню этого чата в Claude. Откройте боковую панель на Mac и обновите чат.');
+    button.click();await waitFor(()=>all('[role="menuitem"],[role="menuitemradio"]').some(visible),2500);
+  }
+  const actionPatterns={rename:/^(переименовать|rename)/i,pin:/^(закрепить|pin)/i,unpin:/^(открепить|unpin)/i,unread:/^(отметить как непрочитан|mark as unread)/i,archive:/^(архивировать|archive)/i,delete:/^(удалить|delete)/i,move:/^(переместить в группу|move to (?:group|project)|переместить в проект)/i};
+  async function manageChat(message){
+    const pattern=actionPatterns[message.action];if(!pattern)throw Error('Неизвестное действие с чатом');
+    await openChatMenu();const item=choices().find(n=>n.closest('[role="menu"]')&&pattern.test(label(n)));
+    if(!item||item.disabled||item.getAttribute('aria-disabled')==='true'){await closeMenus();throw Error('Действие недоступно в меню Claude');}
+    if(message.action==='move'){
+      await submenu(pattern);
+      const items=choices().filter(n=>n!==item&&n.closest('[role="menu"],[role="listbox"]')&&!Object.values(actionPatterns).some(p=>p.test(label(n))));
+      const groups=[...new Set(items.map(label).filter(t=>t&&!/создать|create|new group/i.test(t)))];
+      if(message.group===undefined){await closeMenus();return {groups};}
+      const group=items.find(n=>label(n)===message.group);if(!group)throw Error('Группа не найдена в Claude');group.click();
+    }else item.click();
+    if(message.action==='rename'){
+      const input=await waitFor(()=>all('[role="dialog"] input,dialog input').find(visible),2500);
+      const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(input,message.title);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
+      const dialog=input.closest('[role="dialog"],dialog');const confirm=all('button',dialog).find(b=>/^(сохранить|save|переименовать|rename)$/i.test(label(b)));if(!confirm)throw Error('Не найдена кнопка сохранения имени в Claude');confirm.click();
+      await waitFor(()=>!visible(dialog)&&chatIndex().some(c=>c.url===message.url&&c.title===message.title),3000);
+    }else{
+      // Native delete/archive confirmations are accepted only for the exact requested action.
+      await delay(100);const dialog=all('[role="alertdialog"],[role="dialog"],dialog').find(visible);
+      if(dialog){const confirm=all('button',dialog).find(b=>pattern.test(label(b)));if(!confirm)throw Error('Claude запросил дополнительное подтверждение во вкладке на Mac');confirm.click();await waitFor(()=>!visible(dialog),3000);}
+      await waitFor(()=>!all('[role="menu"]').some(visible),3000);
+      if(['delete','archive'].includes(message.action))await waitFor(()=>!all('a[href]').some(a=>{try{return new URL(a.href).origin+new URL(a.href).pathname===message.url;}catch{return false;}}),3000);
+      else if(message.action==='pin'||message.action==='unpin'){
+        await openChatMenu();const opposite=actionPatterns[message.action==='pin'?'unpin':'pin'];if(!choices().some(n=>opposite.test(label(n))))throw Error('Claude не подтвердил закрепление');await closeMenus();
+      }
+    }
+    return {applied:true,action:message.action};
+  }
   function snapshot(){
     const root=document.querySelector('main')||document;
     const nodes=all('[data-testid="user-message"],[data-message-author-role="user"],.font-claude-response,[data-testid="assistant-message"]',root).filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="user-message"],[data-message-author-role="user"],.font-claude-response,[data-testid="assistant-message"]'));
     const messages=nodes.map(n=>({role:n.matches('.font-claude-response,[data-testid="assistant-message"]')?'assistant':'user',text:messageText(n),files:[]}));
     const rawTitle=document.title.replace(/\s*[-|—]\s*Claude.*$/i,'').trim();
-    const title=/^claude(?:\.ai)?$/i.test(rawTitle)?'':rawTitle;
-    return {url:chatURL(),title,messages};
+    const header=document.querySelector('[data-testid="session-title-split"] h2,[data-testid="chat-header"] h2');
+    const title=(header&&visible(header)?label(header):'')||(/^claude(?:\.ai)?$/i.test(rawTitle)?'':rawTitle);
+    return {url:chatURL(),title,messages,state:readState()};
   }
   function chatIndex(){
     const index=new Map();
-    for(const a of all('a[href]')){let u;try{u=new URL(a.href);}catch{continue;}if(u.origin!=='https://claude.ai'||!/^\/chat\/[a-zA-Z0-9-]+$/.test(u.pathname))continue;const title=(a.getAttribute('title')||a.innerText).trim();if(title)index.set(u.origin+u.pathname,{title:title.slice(0,160),url:u.origin+u.pathname});}
+    for(const a of all('a[href]')){let u;try{u=new URL(a.href);}catch{continue;}if(u.origin!=='https://claude.ai'||!/^\/chat\/[a-zA-Z0-9-]+$/.test(u.pathname))continue;const title=(a.getAttribute('title')||label(a.querySelector('[data-row-label]'))||label(a)).trim();if(title)index.set(u.origin+u.pathname,{title:title.slice(0,160),url:u.origin+u.pathname,pinned:!!a.closest('[data-testid="sidebar-pinned"],[data-testid="nav-pin-rows"]')});}
     const current=snapshot();if(current.url&&!index.has(current.url))index.set(current.url,{title:current.title,url:current.url});
     return [...index.values()];
   }
@@ -100,7 +151,7 @@
     if(!files.length)return null;
     if(files.length>5)throw Error('Можно прикрепить до 5 файлов');
     let input=uploadInput();
-    if(!input){const add=all('button').find(b=>visible(b)&&/add files|attach|добавить файлы|прикрепить|добавить вложения/i.test(label(b)));if(add){add.click();await delay(150);input=uploadInput();}}
+    if(!input){const add=all('button').find(b=>visible(b)&&/add files|attach|добавить файлы|прикрепить|добавить вложения/i.test(label(b)));if(add){add.click();await delay(50);input=uploadInput();}}
     if(!input)throw Error('В Claude не найдено поле загрузки файлов. Откройте меню «+» во вкладке на Mac и повторите.');
     const root=composerRoot();if(!root)throw Error('Не найдено поле сообщения для вложений');
     const existingPreviews=imagePreviews(root);
@@ -168,24 +219,27 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:5});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:6});return;}
     if(message.type!=='run')return;
-    if(busy){respond({error:'Во вкладке уже выполняется запрос'});return;}busy=true;
+    if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
+    if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;
     (async()=>{
       let submissionAttempted=false;
       try{
         if(message.kind==='inspect'||message.kind==='options'){
           if(message.kind==='options')await applySettings(message.settings);
-          const catalog=await inspectCatalog();respond({done:true,result:{catalog,chats:chatIndex(),snapshot:snapshot()}});return;
+          const catalog=message.kind==='options'?quickCatalog():await inspectCatalog();respond({done:true,result:{catalog,chats:chatIndex(),snapshot:snapshot()}});return;
         }
+        if(message.kind==='manage'){const result=await manageChat(message);respond({done:true,result});return;}
         if(message.kind==='open'){
           await waitFor(()=>responses().length||all('[data-testid="user-message"]').length||editor());
           const state=snapshot(),generated=await collectFiles();const last=state.messages.findLast(m=>m.role==='assistant');if(last)last.files=generated.files;
-          respond({done:true,result:{snapshot:state,warnings:generated.warnings}});return;
+          respond({done:true,result:{snapshot:state,catalog:await inspectCatalog(),warnings:generated.warnings}});return;
         }
         let input=await waitFor(editor);
         if(input.innerText.trim())throw Error('Во вкладке есть неотправленный черновик. Отправьте или удалите его вручную.');
         await applySettings(message.settings);
+        requireAvailable();if(readState().streaming)throw Error('В этом чате Claude ещё отвечает. Дождитесь завершения ответа.');
         const upload=await attachFiles(message.files);
         const text=message.text||'Посмотри прикреплённые файлы.';
         let textInsertions=0,readySince=0;
@@ -193,7 +247,7 @@
         let send=null;
         while(Date.now()<prepareUntil){
           const root=composerRoot(),box=editor();if(!root||!box){await delay(100);continue;}
-          const problem=uploadProblem(root);if(problem)throw Error('Claude не принял файл: '+problem);
+          requireAvailable();const problem=uploadProblem(root);if(problem)throw Error('Claude не принял файл: '+problem);
           if(!normalized(box.innerText)){
             if(textInsertions>=3)throw Error('Claude несколько раз сбросил текст после загрузки файла. Черновик оставлен во вкладке; сообщение не отправлено.');
             if(insertOwnedText(text))textInsertions++;
@@ -211,12 +265,12 @@
         if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');
         submissionAttempted=true;send.click();
         try{
-          await waitFor(()=>userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before,10000);
-        }catch{throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}
+          await waitFor(()=>{requireAvailable();return userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before;},10000);
+        }catch(e){if(e.state){e.notSent=!userMessages().some(n=>!beforeUsers.has(turnKey(n)));throw e;}throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}
         let previous='',unchangedSince=0,completedSince=0,seenStop=false;
         const deadline=Date.now()+165000;
         while(Date.now()<deadline){
-          await delay(250);
+          await delay(250);requireAvailable();
           const list=responses(),text=list.length>before?messageText(list.at(-1)):'';
           const stopping=list.at(-1)?.getAttribute('data-is-streaming')==='true'||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)));
           if(stopping)seenStop=true;
@@ -228,11 +282,11 @@
             const {files,warnings}=await collectFiles();
             for(const file of files){const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
             for(const warning of warnings)await chrome.runtime.sendMessage({type:'warning',id:message.id,warning});
-            const state=snapshot();respond({done:true,result:{url:state.url,title:state.title}});return;
+            const state=snapshot();respond({done:true,result:{url:state.url,title:state.title,state:state.state}});return;
           }
         }
         throw Error('Время ожидания истекло. Проверьте чат на Mac перед повторной отправкой.');
-      }catch(e){respond({error:e.message,notSent:!submissionAttempted});}finally{busy=false;}
+      }catch(e){respond({error:e.message,notSent:e.notSent===true||!submissionAttempted,state:e.state});}finally{busy=false;}
     })();return true;
   });
 })();

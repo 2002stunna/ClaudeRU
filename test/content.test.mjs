@@ -48,14 +48,14 @@ test('web interface: sync sidebar, choose settings, upload, download and safely 
   const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
   const generated='<script>window.untrustedExecuted = true</script><h1>Hello</h1>';
   const bridge={status:{connected:true},
-    execute:async job=>job.kind==='open'?{snapshot:{url:job.url,title:'Старый разговор',messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Сохранённый ответ'}]}}:{catalog:{models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:job.settings?.model||'Sonnet 5.5',effort:'medium'}},chats:[{title:'Старый разговор',url:'https://claude.ai/chat/old-123'}]},
+    execute:async job=>job.kind==='manage'?{applied:true}:job.kind==='open'?{snapshot:{url:job.url,title:job.url==='https://claude.ai/chat/old-123'?'Старый разговор':'',messages:job.url==='https://claude.ai/chat/old-123'?[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Сохранённый ответ'}]:[]},catalog:{models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:'Sonnet 5.5',effort:job.url==='https://claude.ai/chat/created-456'?'high':'medium'}}}:{catalog:{models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:job.settings?.model||'Sonnet 5.5',effort:job.settings?.effort||'medium'}},chats:[{title:'Старый разговор',url:'https://claude.ai/chat/old-123'}]},
     send:async job=>{assert.equal(job.settings.model,'Sonnet 5.5');assert.equal(job.settings.effort,'high');assert.equal(job.files[0].name,'input.txt');job.onUpdate({text:'Создал документ.\n```html\n<h1>Hello</h1>\n```',url:'https://claude.ai/chat/created-456'});await job.onFile({name:'result.html',type:'text/html',data:Buffer.from(generated).toString('base64')});return{title:'Готовый документ'};}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});t.after(()=>context.close());const page=await context.newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
-  await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();
+  await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();await page.locator('#new-chat').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
   assert.equal(await page.locator('select').count(),0);assert.ok(!(await page.locator('#model-toggle').textContent()).includes('Как в Claude'));
   await page.screenshot({path:'/tmp/clauderu-template-empty.png'});
   await page.locator('#model-toggle').click();await page.locator('#other-models-trigger').click();await page.locator('#model-submenu [data-model="Sonnet 5.5"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
@@ -188,4 +188,78 @@ test('an upload failure reported by the extension restores the website text and 
   await page.locator('#file-input').setInputFiles({name:'image.png',mimeType:'image/png',buffer:Buffer.from(tinyPNG,'base64')});await page.locator('#attachments strong').filter({hasText:'image.png'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#attach').disabled);
   await page.locator('#prompt').fill('Проверь изображение');await page.locator('#send').click();await page.waitForFunction(()=>document.querySelector('#prompt').value==='Проверь изображение'&&document.querySelectorAll('#attachments .file-card').length===1&&!document.querySelector('#model-toggle').disabled);
   assert.equal(await page.locator('article').count(),0);assert.match(await page.locator('#status').textContent(),/не принял файл/);const data=await page.evaluate(async()=>await(await fetch('/api/chats')).json());assert.equal(data.chats[0].messages.length,0);
+});
+
+test('model and effort changes are applied immediately and options avoid a full model rescan',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await run({kind:'inspect'});
+  await page.evaluate(()=>{window.otherMenuOpens=0;document.querySelector('#other-trigger').addEventListener('click',()=>window.otherMenuOpens++);});
+  const started=performance.now();
+  let reply=await run({kind:'options',settings:{model:'Sonnet 5.5'}});assert.equal(reply.done,true,reply.error);assert.equal(reply.result.catalog.current.model,'Sonnet 5.5');
+  reply=await run({kind:'options',settings:{effort:'max'}});assert.equal(reply.done,true,reply.error);assert.equal(reply.result.catalog.current.effort,'max');assert.equal(await page.locator('#model-trigger').innerText(),'Sonnet 5.5 Максимальный');
+  assert.equal(await page.evaluate(()=>window.otherMenuOpens),1,'only the requested model lookup should open Other models');assert.ok(performance.now()-started<2500,'model and effort operations should not incur a ten second menu scan');assert.equal(await page.locator('[data-testid="user-message"]').count(),0);
+});
+test('chat opening reads the actual model, effort and quota notice; sending does not click a blocked model',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  const notice='У вас закончились кредиты использования. Купите еще, чтобы и дальше использовать Fable, или смените модель, чтобы продолжить.';
+  await page.evaluate(text=>{const n=document.createElement('div');n.dataset.testid='hub-composer-notices';n.textContent=text;document.querySelector('main').append(n);window.clicks=0;document.querySelector('#send').onclick=()=>window.clicks++;},notice);
+  const opened=await run({kind:'open'});assert.equal(opened.result.snapshot.state.model,'Fable 5.1');assert.equal(opened.result.snapshot.state.effort,'medium');assert.equal(opened.result.snapshot.state.blocked,notice);
+  const sent=await run({kind:'chat',text:'Не отправлять'});assert.equal(sent.notSent,true);assert.equal(sent.state.model,'Fable 5.1');assert.equal(sent.error,notice);assert.equal(await page.evaluate(()=>window.clicks),0);
+  await page.locator('[data-testid="hub-composer-notices"]').evaluate(n=>n.remove());
+});
+test('quota rejection after clicking exits promptly without resending or waiting four minutes',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{window.clicks=0;document.querySelector('#send').onclick=()=>{window.clicks++;const notice=document.createElement('div');notice.setAttribute('role','alert');notice.textContent='You are out of credits. Switch models to continue.';document.querySelector('main').append(notice);};});
+  const start=performance.now(),reply=await run({kind:'chat',text:'Проверка'});
+  assert.match(reply.error,/out of credits/);assert.equal(reply.notSent,true);assert.equal(await page.evaluate(()=>window.clicks),1);assert.ok(performance.now()-start<2000);
+  const state=await run({kind:'state'});assert.equal(state.done,true);assert.match(state.result.state.blocked,/credits/);
+});
+test('quota text inside conversation history never blocks a new request',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.locator('#transcript').evaluate(n=>n.innerHTML='<div data-testid="user-message"><p>У вас закончились кредиты использования</p></div>');
+  const result=await run({kind:'chat',text:'Новый вопрос'});assert.equal(result.done,true,result.error);
+});
+
+async function installChatActions(page){
+  await page.evaluate(()=>{
+    const link=document.querySelector('aside a'),row=document.createElement('div');link.replaceWith(row);row.append(link);
+    const more=document.createElement('button');more.setAttribute('aria-label','Дополнительные параметры');row.append(more);
+    const menu=document.createElement('div');menu.setAttribute('role','menu');menu.hidden=true;document.body.append(menu);let pinned=false;
+    const closeMenus=()=>document.querySelectorAll('[role=menu]').forEach(n=>n.hidden=true);
+    const item=(text,click)=>{const b=document.createElement('button');b.setAttribute('role','menuitem');b.textContent=text;b.onclick=()=>{closeMenus();click?.();};menu.append(b);};
+    more.onclick=()=>{menu.replaceChildren();menu.hidden=false;
+      item('Отметить как непрочитанное',()=>row.dataset.unread='true');item(pinned?'Открепить':'Закрепить',()=>pinned=!pinned);
+      item('Переименовать',()=>{const dialog=document.createElement('div');dialog.setAttribute('role','dialog');const input=document.createElement('input');input.value=link.textContent;const save=document.createElement('button');save.textContent='Сохранить';save.onclick=()=>{link.textContent=input.value;dialog.remove();};dialog.append(input,save);document.body.append(dialog);});
+      item('Переместить в группу',()=>{const submenu=document.createElement('div');submenu.setAttribute('role','menu');const group=document.createElement('button');group.setAttribute('role','menuitemradio');group.textContent='Работа';group.onclick=()=>{row.dataset.group='Работа';submenu.remove();};submenu.append(group);document.body.append(submenu);});
+      item('Архивировать',()=>row.remove());item('Удалить',()=>{const dialog=document.createElement('div');dialog.setAttribute('role','alertdialog');const confirm=document.createElement('button');confirm.textContent='Удалить';confirm.onclick=()=>{row.remove();dialog.remove();};dialog.append(confirm);document.body.append(dialog);});
+    };
+  });
+}
+test('native chat actions rename, pin, mark unread, move to a real group and archive',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await installChatActions(page);
+  for(const action of [{action:'rename',title:'Новое имя'},{action:'pin'},{action:'unpin'},{action:'unread'}]){const result=await run({kind:'manage',url:'https://claude.ai/chat/current-123',...action});assert.equal(result.result?.applied,true,result.error);}
+  assert.equal(await page.locator('aside a').first().textContent(),'Новое имя');assert.equal(await page.locator('aside a').first().evaluate(n=>n.parentElement.dataset.unread),'true');
+  let result=await run({kind:'manage',action:'move',url:'https://claude.ai/chat/current-123'});assert.deepEqual(result.result.groups,['Работа']);
+  result=await run({kind:'manage',action:'move',group:'Работа',url:'https://claude.ai/chat/current-123'});assert.equal(result.result?.applied,true,result.error);assert.equal(await page.locator('aside a').first().evaluate(n=>n.parentElement.dataset.group),'Работа');
+  result=await run({kind:'manage',action:'archive',url:'https://claude.ai/chat/current-123'});assert.equal(result.result?.applied,true,result.error);assert.equal(await page.locator('aside a[href="/chat/current-123"]').count(),0);
+});
+test('native delete accepts the requested confirmation and verifies removal from the sidebar',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await installChatActions(page);const result=await run({kind:'manage',action:'delete',url:'https://claude.ai/chat/current-123'});assert.equal(result.result?.applied,true,result.error);assert.equal(await page.locator('aside a[href="/chat/current-123"]').count(),0);
+});
+
+test('web UI shows the true limited model, applies effort in Claude, and a new chat stays usable during another response',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs'),{scryptSync}=await import('node:crypto');let release,started;
+  const holding=new Promise(r=>release=r),entered=new Promise(r=>started=r);t.after(()=>release());const observed=new Map(),jobs=[];
+  const read=job=>{if(!observed.has(job.chatId))observed.set(job.chatId,{model:job.url?.endsWith('/limited')?'Fable 5.1':'Haiku 5.5',effort:'medium',blocked:job.url?.endsWith('/limited')?'У вас закончились кредиты использования. Смените модель, чтобы продолжить.':'',streaming:false});return observed.get(job.chatId);};
+  const bridge={status:{connected:true},execute:async job=>{
+    jobs.push(job);const state=read(job);if(job.kind==='state')return{state};
+    if(job.kind==='options'){Object.assign(state,job.settings);state.blocked=state.model==='Fable 5.1'?'Закончились кредиты':'';}
+    return{catalog:{models:['Fable 5.1','Sonnet 5.5','Haiku 5.5'],efforts:['medium','high'],current:state},chats:[{url:'https://claude.ai/chat/limited',title:'Первый разговор'}],...(job.kind==='open'?{snapshot:{url:job.url,messages:[],state}}:{})};
+  },send:async job=>{if(job.text==='Первый запрос'){job.onUpdate({text:'Ответ первого чата',url:'https://claude.ai/chat/limited'});started();await holding;}else job.onUpdate({text:'Ответ второго чата',url:'https://claude.ai/chat/second'});return{title:job.text==='Первый запрос'?'Первый разговор':'Второй разговор',state:{...read(job),streaming:false}};}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('pw');await page.locator('#login-form button').click();
+  await page.locator('#model-label').filter({hasText:'Fable 5.1'}).waitFor();await page.locator('#prompt').fill('Первый запрос');assert.equal(await page.locator('#send').isDisabled(),true);assert.match(await page.locator('#claude-notice').textContent(),/закончились кредиты/);assert.equal(await page.locator('#model-toggle').isEnabled(),true);
+  await page.locator('#model-toggle').click();await page.locator('#other-models-trigger').click();await page.locator('[data-model="Sonnet 5.5"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
+  await page.locator('#model-toggle').click();await page.locator('#effort-menu-trigger').click();await page.locator('[data-effort="high"]').click();await page.waitForFunction(()=>document.querySelector('#effort-label').textContent==='Высокий'&&!document.querySelector('#send').disabled);
+  assert.ok(jobs.some(j=>j.kind==='options'&&j.settings.effort==='high'));await page.locator('#send').click();await entered;
+  await page.locator('#new-chat').click();await page.waitForFunction(()=>document.querySelector('#model-label').textContent==='Haiku 5.5'&&!document.querySelector('#model-toggle').disabled);assert.equal(await page.locator('#claude-notice').isHidden(),true);
+  await page.locator('#prompt').fill('Второй запрос');await page.locator('#send').click();await page.getByText('Ответ второго чата',{exact:true}).waitFor();assert.equal(await page.getByText('Ответ первого чата',{exact:true}).count(),0);
+  await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);release();await page.locator('#chats .chat-row>button:first-child').filter({hasText:'Первый разговор'}).click();await page.getByText('Ответ первого чата',{exact:true}).waitFor();assert.equal(await page.getByText('Ответ второго чата',{exact:true}).count(),0);
 });

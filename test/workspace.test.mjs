@@ -21,9 +21,9 @@ test('files and conversations survive server restart without storing base64 in c
   assert.throws(()=>chatOptions({effort:'ultra'}),/Некорректный/);
 });
 async function app(t){
-  const state={settings:null,files:null};
+  const state={settings:null,files:null,title:'Старый чат'};
   const bridge={status:{connected:true},
-    execute:async job=>job.kind==='open'?{snapshot:{url:job.url,title:'Старый чат',messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:{models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}},chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
+    execute:async job=>job.kind==='manage'?(state.title=job.title||state.title,{applied:true}):job.kind==='open'?{snapshot:{url:job.url,title:state.title,messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:{models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}},chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
     send:async job=>{if(job.text==='Отклонить до отправки'){const error=Error('Ошибка обработки вложения');error.notSent=true;throw error;}state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',url:'https://claude.ai/chat/new-456'});await job.onFile({name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')});return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
   const auth={salt:'test',hash:scryptSync('test-password','test',64).toString('hex')};
   const server=createApp({auth,bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
@@ -58,4 +58,31 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
   const beforeFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);
   const failed=await post('/api/chat',{chatId:chat.id,text:'Отклонить до отправки',fileIds:[file.id]});const failure=JSON.parse((await failed.text()).trim());assert.equal(failure.type,'error');assert.equal(failure.notSent,true);
   const afterFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);assert.equal(afterFailure.messages.length,beforeFailure.messages.length);assert.equal(afterFailure.title,beforeFailure.title);
+});
+
+test('native chat metadata is saved only after confirmation and deleted chats stay deleted after sync',async t=>{
+  const store=new DataStore(),chat=await store.create({url:'https://claude.ai/chat/manage-test',title:'Before'}),calls=[];let confirm=false;
+  const bridge={status:{connected:true},execute:async job=>{calls.push(job);if(job.kind==='manage')return confirm?{applied:true}:{};return{chats:[{url:chat.url,title:'Before'}],catalog:{models:[],efforts:[],current:{}}};}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});
+  cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];
+  assert.equal((await post('/api/chats/action',{id:chat.id,action:'rename',title:'After'})).status,400);assert.equal(chat.title,'Before');
+  confirm=true;let response=await(await post('/api/chats/action',{id:chat.id,action:'rename',title:'After'})).json();assert.equal(response.chat.title,'After');assert.equal(calls.at(-1).kind,'manage');assert.equal(calls.at(-1).chatId,chat.id);
+  response=await(await post('/api/chats/action',{id:chat.id,action:'delete'})).json();assert.equal(response.chat.deleted,true);
+  await post('/api/sync',{});assert.equal((await store.list()).length,0);await assert.rejects(store.get(chat.id),/не найден/);
+});
+test('one generating chat does not block opening, configuring or sending in another chat',async t=>{
+  const store=new DataStore(),a=await store.create(),b=await store.create(),jobs=[];let finish,entered;
+  a.url='https://claude.ai/chat/'+a.id;await store.save(a);const started=new Promise(r=>entered=r),hold=new Promise(r=>finish=r);t.after(()=>finish());
+  const bridge={status:{connected:true},execute:async job=>{jobs.push(job);if(job.kind==='inspect')return{chats:[],snapshot:{url:a.url,messages:[{role:'user',text:'Stale snapshot'}]},catalog:{current:{}}};return {catalog:{models:['Fable 5.1'],efforts:['high'],current:{model:'Fable 5.1',effort:job.settings?.effort||'medium',blocked:'credits'}},snapshot:{messages:[],state:{model:'Fable 5.1',effort:'medium',blocked:'credits'}}};},send:async job=>{jobs.push(job);if(job.chatId===a.id){entered();await hold;}job.onUpdate({text:job.chatId,url:'https://claude.ai/chat/'+job.chatId});return {state:{model:'Fable 5.1',effort:'high',blocked:''}};}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});
+  cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];
+  const first=post('/api/chat',{chatId:a.id,text:'First'});await started;
+  assert.equal((await post('/api/chat',{chatId:a.id,text:'Duplicate'})).status,409);
+  assert.equal((await post('/api/sync',{})).status,200);assert.equal(a.messages[0].text,'First','sync must not replace a streaming conversation with another tab snapshot');
+  const opened=await(await post('/api/chats/open',{id:b.id})).json();assert.equal(opened.chat.settings.model,'Fable 5.1');assert.equal(opened.chat.claudeState.blocked,'credits');
+  const changed=await(await post('/api/options',{id:b.id,settings:{effort:'high'}})).json();assert.equal(changed.chat.settings.effort,'high');assert.equal(jobs.at(-1).settings.effort,'high');
+  const second=await post('/api/chat',{chatId:b.id,text:'Second'});assert.equal(second.status,200);assert.equal(JSON.parse((await second.text()).trim().split('\n').at(-1)).type,'done');
+  finish();await(await first).text();assert.equal(a.messages.at(-1).text,a.id);assert.equal(b.messages.at(-1).text,b.id);
 });

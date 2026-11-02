@@ -43,8 +43,8 @@ export class DataStore {
     });
     this.queue=next.catch(()=>{});return next;
   }
-  async list(){await this.ready;return this.chats;}
-  async get(id){await this.ready;const chat=this.chats.find(c=>c.id===id);if(!chat)throw Error('Чат не найден');return chat;}
+  async list(){await this.ready;return this.chats.filter(c=>!c.deleted);}
+  async get(id){await this.ready;const chat=this.chats.find(c=>c.id===id&&!c.deleted);if(!chat)throw Error('Чат не найден');return chat;}
   async create({title='Новый разговор',url=null,messages=[],settings={}}={}) {
     await this.ready;if(url)url=conversationURL(url);
     const existing=url && this.chats.find(c=>c.url===url);if(existing)return existing;
@@ -56,7 +56,7 @@ export class DataStore {
     if(!Array.isArray(index))return;
     for(const item of index.slice(0,300).reverse()){
       if(!item || typeof item.title!=='string')continue;
-      try{await this.create({title:item.title,url:conversationURL(item.url)});}catch{}
+      try{const chat=await this.create({title:item.title,url:conversationURL(item.url)});if(chat.deleted)continue;chat.title=item.title.slice(0,160);if(typeof item.pinned==='boolean')chat.pinned=item.pinned;await this.persist();}catch{}
     }
   }
   async putFile(file){
