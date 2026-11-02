@@ -53,9 +53,9 @@ test('web interface: sync sidebar, choose settings, upload, download and safely 
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});t.after(()=>context.close());const page=await context.newPage();
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const errors=[],openRequests=[];page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.url().endsWith('/api/chats/open'))openRequests.push(r.postDataJSON());});
   await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
-  await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();await page.locator('#new-chat').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
+  await page.locator('#chats button').filter({hasText:'Старый разговор'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#refresh-chat').disabled);assert.ok(openRequests.every(r=>r.collectArtifacts===false));await page.locator('#refresh-chat').click();await page.waitForFunction(()=>!document.querySelector('#refresh-chat').disabled);assert.equal(openRequests.at(-1).collectArtifacts,true);await page.locator('#new-chat').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
   assert.equal(await page.locator('select').count(),0);assert.ok(!(await page.locator('#model-toggle').textContent()).includes('Как в Claude'));
   await page.screenshot({path:'/tmp/clauderu-template-empty.png'});
   await page.locator('#model-toggle').click();await page.locator('#other-models-trigger').click();await page.locator('#model-submenu [data-model="Sonnet 5.5"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
@@ -262,4 +262,30 @@ test('web UI shows the true limited model, applies effort in Claude, and a new c
   await page.locator('#new-chat').click();await page.waitForFunction(()=>document.querySelector('#model-label').textContent==='Haiku 5.5'&&!document.querySelector('#model-toggle').disabled);assert.equal(await page.locator('#claude-notice').isHidden(),true);
   await page.locator('#prompt').fill('Второй запрос');await page.locator('#send').click();await page.getByText('Ответ второго чата',{exact:true}).waitFor();assert.equal(await page.getByText('Ответ первого чата',{exact:true}).count(),0);
   await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);release();await page.locator('#chats .chat-row>button:first-child').filter({hasText:'Первый разговор'}).click();await page.getByText('Ответ первого чата',{exact:true}).waitFor();assert.equal(await page.getByText('Ответ второго чата',{exact:true}).count(),0);
+});
+
+test('opening a chat does not open artifacts or show export warnings automatically',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Ответ сохранён<button data-testid="artifact-button">Документ</button></div>';window.artifactClicks=0;document.querySelector('[data-testid="artifact-button"]').onclick=()=>window.artifactClicks++;});
+  const result=await run({kind:'open'});assert.equal(result.done,true,result.error);assert.deepEqual(result.result.warnings,[]);assert.equal(await page.evaluate(()=>window.artifactClicks),0);assert.match(result.result.snapshot.messages.at(-1).text,/Ответ сохранён/);
+});
+test('explicit artifact export waits for the new panel and its code instead of exporting a stale artifact',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Документ<button data-testid="artifact-button" aria-controls="current-artifact">Открыть артефакт</button></div>';
+    const panel=document.createElement('div');panel.id='current-artifact';panel.dataset.testid='artifact-panel';panel.innerHTML='<pre><code class="language-python">old_private_source()</code></pre>';document.body.append(panel);
+    document.querySelector('[data-testid="artifact-button"]').onclick=()=>setTimeout(()=>{panel.innerHTML='<button role="tab">Код</button>';panel.querySelector('button').onclick=()=>setTimeout(()=>{const pre=document.createElement('pre');pre.innerHTML='<code class="language-python">new_document()</code>';panel.append(pre);},450);},650);
+  });
+  const result=await run({kind:'open',collectArtifacts:true});assert.equal(result.done,true,result.error);assert.deepEqual(result.result.warnings,[]);
+  const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'code-1.py');assert.equal(Buffer.from(files[0].data,'base64').toString(),'new_document()');assert.ok(!JSON.stringify(result).includes('old_private_source'));
+});
+test('an unsupported artifact has a plain export warning only on explicit refresh',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Ответ<button data-testid="artifact-button">Документ</button></div>';document.querySelector('[data-testid="artifact-button"]').onclick=()=>{const panel=document.createElement('div');panel.dataset.testid='artifact-panel';panel.textContent='Предпросмотр документа';document.body.append(panel);};});
+  const result=await run({kind:'open',collectArtifacts:true});assert.equal(result.done,true,result.error);assert.equal(result.result.warnings.length,1);assert.match(result.result.warnings[0],/Не удалось добавить файл/);assert.ok(!result.result.warnings[0].includes('разметке'));assert.equal(result.result.snapshot.messages.at(-1).text,'Ответ');
+});
+test('old open artifact panels and artifact navigation buttons are not collected from unrelated messages',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Обычный ответ</div>';const panel=document.createElement('div');panel.dataset.testid='artifact-panel';panel.innerHTML='<pre><code>old_private_source()</code></pre>';document.body.append(panel);
+    const nav=document.createElement('button');nav.setAttribute('aria-label','Артефакты');nav.textContent='Артефакты';document.querySelector('main').append(nav);
+  });
+  let result=await run({kind:'open',collectArtifacts:true});assert.deepEqual(result.result.snapshot.messages.at(-1).files,[]);assert.deepEqual(result.result.warnings,[]);
+  await page.locator('#transcript').evaluate(n=>n.replaceChildren());result=await run({kind:'open',collectArtifacts:true});assert.deepEqual(result.result.warnings,[]);
 });

@@ -93,9 +93,9 @@ async function selectChat(id){
   if(!busyHere()){if(operation)pendingSelection=id;else await refreshSelected(id);}
 }
 function finishOperation(){operation=false;updateControls();const id=pendingSelection;pendingSelection=null;if(id&&selected===id&&!busyHere())void refreshSelected(id);}
-async function refreshSelected(id=selected){
+async function refreshSelected(id=selected,{collectArtifacts=false}={}){
   if(operation)return;operation=true;updateControls();
-  try{const data=await api('/api/chats/open',{id});upsert(data.chat);if(data.catalog){catalog={...catalog,...data.catalog,models:[...new Set([...(catalog?.models||[]),...(data.catalog.models||[])])]};catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}}
+  try{const data=await api('/api/chats/open',{id,collectArtifacts});upsert(data.chat);if(data.catalog){catalog={...catalog,...data.catalog,models:[...new Set([...(catalog?.models||[]),...(data.catalog.models||[])])]};catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}}
   catch(e){if(selected===id)status(e.message);}finally{finishOperation();}
 }
 async function sync({quiet=false}={}){
@@ -119,7 +119,7 @@ async function showApp(){
 }
 $('login-form').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{password:$('password').value});$('password').value='';await showApp();}catch(e){$('login-error').textContent=e.message;}};
 $('logout').onclick=async()=>{await post('/api/logout',{});location.reload();};$('new-chat').onclick=newChat;$('search').oninput=renderSidebar;$('sync').onclick=sync;$('refresh-models').onclick=sync;
-$('refresh-chat').onclick=()=>refreshSelected();
+$('refresh-chat').onclick=()=>refreshSelected(selected,{collectArtifacts:true});
 $('toggle-sidebar').onclick=()=>{if(matchMedia('(max-width:700px)').matches){$('sidebar').classList.toggle('open');$('sidebar-backdrop').hidden=!$('sidebar').classList.contains('open');$('toggle-sidebar').setAttribute('aria-expanded',String($('sidebar').classList.contains('open')));}else document.body.classList.remove('sidebar-collapsed');};
 $('collapse-sidebar').onclick=()=>{if(matchMedia('(max-width:700px)').matches){$('sidebar').classList.remove('open');$('sidebar-backdrop').hidden=true;}else document.body.classList.add('sidebar-collapsed');};
 $('sidebar-backdrop').onclick=()=>$('collapse-sidebar').click();

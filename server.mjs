@@ -138,7 +138,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
             return json(200,{chats:await store.list(),catalog:result.catalog});
           }
           const chat=await store.get(body.id);
-          const result=await bridge.execute({kind:'open',chatId:chat.id,url:chat.url});
+          const result=await bridge.execute({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true});
           if(result?.snapshot)await applySnapshot(chat,result.snapshot);chat.unread=false;
           if(result?.catalog){applyState(chat,result.catalog.current);chat.catalog={...result.catalog,models:[...new Set([...(chat.catalog?.models||[]),...(result.catalog.models||[])])]};await store.save(chat);}
           return json(200,{chat,catalog:result.catalog,warnings:result.warnings||[]});
