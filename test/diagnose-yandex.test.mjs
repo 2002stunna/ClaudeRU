@@ -27,3 +27,39 @@ test('diagnosis reads profile files without changing them and handles missing ro
   const {readFile}=await import('node:fs/promises');assert.equal(await readFile(join(root,'Default','Preferences'),'utf8'),data);
   assert.equal((await diagnose(join(root,'missing'))).foundRoot,false);
 });
+
+test('diagnosis finds an unpacked extension through its manifest when prefs omit the name',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'clauderu-unpacked-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const profile=join(root,'Default'),extension=join(root,'local extension');
+  await mkdir(profile);await mkdir(extension);
+  const data=prefs([16777216]);
+  delete data.extensions.settings[id].manifest;
+  data.extensions.settings[id].path=extension;
+  const serialized=JSON.stringify(data);
+  await writeFile(join(profile,'Preferences'),serialized);
+  await writeFile(join(extension,'manifest.json'),JSON.stringify({name:'ClaudeRU — домашний мост',version:'0.2.0',private_field:'do-not-print'}));
+  const report=await diagnose(root);
+  assert.equal(report.records.length,1);
+  assert.equal(report.records[0].version,'0.2.0');
+  assert.equal(report.records[0].identification,'manifest.json установленной папки');
+  assert.equal(report.records[0].reasons[0].code,16777216);
+  assert.equal(report.counters.registrations,2);
+  assert.doesNotMatch(JSON.stringify(report),/secret|private_field|do-not-print|local extension/);
+  const {readFile}=await import('node:fs/promises');
+  assert.equal(await readFile(join(profile,'Preferences'),'utf8'),serialized);
+});
+test('diagnosis resolves installed relative extension paths and reports unreadable manifests',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'clauderu-relative-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const profile=join(root,'Profile 1'),relative=join(id,'0.2.0_0');
+  await mkdir(join(profile,'Extensions',relative),{recursive:true});
+  const data=prefs([256]);delete data.extensions.settings[id].manifest;
+  data.extensions.settings[id].path=relative;
+  delete data.extensions.settings['b'.repeat(32)].manifest;
+  data.extensions.settings['b'.repeat(32)].path=join('missing','0.2.0');
+  await writeFile(join(profile,'Secure Preferences'),JSON.stringify(data));
+  await writeFile(join(profile,'Extensions',relative,'manifest.json'),JSON.stringify({name:'ClaudeRU — домашний мост',version:'0.2.0'}));
+  const report=await diagnose(root);
+  assert.equal(report.records.length,1);assert.equal(report.records[0].profile,'Profile 1');
+  assert.equal(report.records[0].reasons[0].code,256);
+  assert.equal(report.counters.unreadableManifests,1);
+});
