@@ -26,15 +26,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='7'||req.headers['x-clauderu-page-protocol']!=='7'){
+        if(req.headers['x-clauderu-protocol']!=='8'||req.headers['x-clauderu-page-protocol']!=='8'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='7'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.5.1 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='8'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.5.2 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:7});
+          return json(426,{error:this.compatibilityError,requiredProtocol:8});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:7});
+        if(req.url==='/health')return json(200,{ok:true,protocol:8});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -91,8 +91,8 @@ export class ExtensionBridge {
       for(const deliver of [...this.pollWaiters])deliver();
     });
   }
-  async send({chatId,text,url,settings={},files=[],onUpdate,onFile,onWarning}) {
-    return this.execute({kind:'chat',chatId,text,url,settings,files},{onUpdate,onFile,onWarning});
+  async send({chatId,text,url,settings={},files=[],catalogCache,onUpdate,onFile,onWarning}) {
+    return this.execute({kind:'chat',chatId,text,url,settings,files,catalogCache},{onUpdate,onFile,onWarning});
   }
   async close() {
     for(const id of this.jobs.keys())this.finish(id,new Error('Сервер остановлен'));

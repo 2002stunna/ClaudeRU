@@ -1,3 +1,4 @@
+import {mockCatalog} from './helpers/catalog.mjs';
 import {test, before, after} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile,access} from 'node:fs/promises';
@@ -19,7 +20,7 @@ async function fixture(t){
 }
 test('real DOM: inspect models, effort levels and sidebar without sending a message',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);const reply=await run({kind:'inspect'});
-  assert.equal(reply.done,true);assert.deepEqual(reply.result.catalog.models,['Fable 5.1','Sonnet 5.5','Haiku 5.5']);
+  assert.equal(reply.done,true);assert.deepEqual(reply.result.catalog.models,['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5']);
   assert.deepEqual(reply.result.catalog.efforts,['low','medium','high','xhigh','max']);
   assert.equal(reply.result.chats.length,2);assert.equal(await page.locator('[data-testid="assistant-message"]').count(),0);
 });
@@ -48,7 +49,7 @@ test('web interface: sync sidebar, choose settings, upload, download and safely 
   const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
   const generated='<script>window.untrustedExecuted = true</script><h1>Hello</h1>';
   const bridge={status:{connected:true},
-    execute:async job=>job.kind==='manage'?{applied:true}:job.kind==='open'?{snapshot:{url:job.url,title:job.url==='https://claude.ai/chat/old-123'?'Старый разговор':'',messages:job.url==='https://claude.ai/chat/old-123'?[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Сохранённый ответ'}]:[]},catalog:{models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:'Sonnet 5.5',effort:job.url==='https://claude.ai/chat/created-456'?'high':'medium'}}}:{catalog:{models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:job.settings?.model||'Sonnet 5.5',effort:job.settings?.effort||'medium'}},chats:[{title:'Старый разговор',url:'https://claude.ai/chat/old-123'}]},
+    execute:async job=>job.kind==='manage'?{applied:true}:job.kind==='open'?{snapshot:{url:job.url,title:job.url==='https://claude.ai/chat/old-123'?'Старый разговор':'',messages:job.url==='https://claude.ai/chat/old-123'?[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Сохранённый ответ'}]:[]},catalog:mockCatalog({models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:'Sonnet 5.5',effort:job.url==='https://claude.ai/chat/created-456'?'high':'medium'}})}:{catalog:mockCatalog({models:['Sonnet 5.5','Haiku 5.5'],efforts:['low','medium','high'],current:{model:job.settings?.model||'Sonnet 5.5',effort:job.settings?.effort||'medium'}}),chats:[{title:'Старый разговор',url:'https://claude.ai/chat/old-123'}]},
     send:async job=>{assert.equal(job.settings.model,'Sonnet 5.5');assert.equal(job.settings.effort,'high');assert.equal(job.files[0].name,'input.txt');job.onUpdate({text:'Создал документ.\n```html\n<h1>Hello</h1>\n```',url:'https://claude.ai/chat/created-456'});await job.onFile({name:'result.html',type:'text/html',data:Buffer.from(generated).toString('base64')});return{title:'Готовый документ'};}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
@@ -60,11 +61,11 @@ test('web interface: sync sidebar, choose settings, upload, download and safely 
   await page.screenshot({path:'/tmp/clauderu-template-empty.png'});
   await page.locator('#model-toggle').click();await page.locator('#other-models-trigger').click();await page.locator('#model-submenu [data-model="Sonnet 5.5"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
   await page.locator('#model-toggle').click();await page.locator('#effort-menu-trigger').click();await page.screenshot({path:'/tmp/clauderu-template-model-menu.png'});await page.locator('#effort-options [data-effort="high"]').click();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
-  await page.locator('#file-input').setInputFiles({name:'input.txt',mimeType:'text/plain',buffer:Buffer.from('input data')});await page.locator('#attachments strong').filter({hasText:'input.txt'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#attach').disabled);
+  await page.locator('#file-input').setInputFiles({name:'input.txt',mimeType:'text/plain',buffer:Buffer.from('input data')});await page.locator('#attachments strong').filter({hasText:'input.txt'}).waitFor();await page.waitForFunction(()=>!document.querySelector('#attach').disabled);assert.equal(await page.locator('#status').isHidden(),true);
   await page.locator('#prompt').fill('Создай документ');await page.locator('#send').click();await page.locator('article.assistant .file-card strong').filter({hasText:'result.html'}).waitFor();
   await page.locator('article.assistant .file-card button').click();await page.locator('#file-preview').waitFor({state:'visible'});assert.equal(await page.locator('#preview-text').textContent(),generated);assert.equal(await page.evaluate(()=>window.untrustedExecuted),undefined);await page.locator('#close-preview').click();
   const promise=page.waitForEvent('download');await page.locator('article.assistant .file-card a').click();const download=await promise;assert.equal(await readFile(await download.path(),'utf8'),generated);
-  await page.screenshot({path:'/tmp/clauderu-template-desktop.png'});
+  await page.setViewportSize({width:1728,height:1000});assert.ok(await page.locator('#composer').evaluate(n=>n.getBoundingClientRect().width)>=1100);await page.screenshot({path:'/tmp/clauderu-template-desktop.png'});
   await page.locator('#chats button').filter({hasText:'Старый разговор'}).click();await page.getByText('Сохранённый ответ',{exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});await page.locator('#toggle-sidebar').click();assert.ok(await page.locator('#sidebar').evaluate(n=>n.classList.contains('open')));await page.locator('#chats button').filter({hasText:'Готовый документ'}).click();await page.locator('article.assistant .file-card').waitFor();
   assert.equal(await page.locator('#model-label').textContent(),'Sonnet 5.5');assert.equal(await page.locator('#effort-label').textContent(),'Высокий');
@@ -132,12 +133,12 @@ test('connection status is fetched once per second without reloading the website
 test('streaming updates the active answer while preserving previous message nodes',{skip:!executable},async t=>{
   const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');let next,finish;
   const nextPart=new Promise(r=>next=r),finished=new Promise(r=>finish=r);t.after(()=>{next();finish();});
-  const bridge={status:{connected:true},execute:async()=>({catalog:{models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}},chats:[]}),send:async job=>{job.onUpdate({text:'Первая часть',url:'https://claude.ai/chat/stream-test'});await nextPart;job.onUpdate({text:'Первая часть. Продолжение.',url:'https://claude.ai/chat/stream-test'});await finished;}};
+  const bridge={status:{connected:true},execute:async()=>({catalog:mockCatalog({models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}}),chats:[]}),send:async job=>{job.onUpdate({text:'Первая часть',url:'https://claude.ai/chat/stream-test'});await nextPart;job.onUpdate({text:'Первая часть. Продолжение.',url:'https://claude.ai/chat/stream-test'});await finished;}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
-  await page.locator('#prompt').fill('Расскажи');await page.locator('#send').click();await page.getByText('Первая часть',{exact:true}).waitFor();
+  await page.locator('#prompt').fill('Расскажи');await page.locator('#send').click();await page.getByText('Первая часть',{exact:true}).waitFor();assert.equal(await page.locator('#status').isHidden(),true);
   await page.evaluate(()=>window.previousMessageNode=document.querySelector('article.user'));next();
   await page.getByText('Первая часть. Продолжение.',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.previousMessageNode===document.querySelector('article.user')),true);finish();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
 });
@@ -180,7 +181,7 @@ test('a click without a new conversation turn is reported without clicking send 
 });
 test('an upload failure reported by the extension restores the website text and file draft',{skip:!executable},async t=>{
   const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');
-  const bridge={status:{connected:true},execute:async()=>({catalog:{models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}},chats:[]}),send:async()=>{const error=Error('Claude не принял файл');error.notSent=true;throw error;}};
+  const bridge={status:{connected:true},execute:async()=>({catalog:mockCatalog({models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}}),chats:[]}),send:async()=>{const error=Error('Claude не принял файл');error.notSent=true;throw error;}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
@@ -251,7 +252,7 @@ test('web UI shows the true limited model, applies effort in Claude, and a new c
   const bridge={status:{connected:true},execute:async job=>{
     jobs.push(job);const state=read(job);if(job.kind==='state')return{state};
     if(job.kind==='options'){Object.assign(state,job.settings);state.blocked=state.model==='Fable 5.1'?'Закончились кредиты':'';}
-    return{catalog:{models:['Fable 5.1','Sonnet 5.5','Haiku 5.5'],efforts:['medium','high'],current:state},chats:[{url:'https://claude.ai/chat/limited',title:'Первый разговор'}],...(job.kind==='open'?{snapshot:{url:job.url,messages:[],state}}:{})};
+    return{catalog:mockCatalog({models:['Fable 5.1','Sonnet 5.5','Haiku 5.5'],efforts:['medium','high'],current:state}),chats:[{url:'https://claude.ai/chat/limited',title:'Первый разговор'}],...(job.kind==='open'?{snapshot:{url:job.url,messages:[],state}}:{})};
   },send:async job=>{if(job.text==='Первый запрос'){job.onUpdate({text:'Ответ первого чата',url:'https://claude.ai/chat/limited'});started();await holding;}else job.onUpdate({text:'Ответ второго чата',url:'https://claude.ai/chat/second'});return{title:job.text==='Первый запрос'?'Первый разговор':'Второй разговор',state:{...read(job),streaming:false}};}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('pw');await page.locator('#login-form button').click();
@@ -288,4 +289,30 @@ test('old open artifact panels and artifact navigation buttons are not collected
   });
   let result=await run({kind:'open',collectArtifacts:true});assert.deepEqual(result.result.snapshot.messages.at(-1).files,[]);assert.deepEqual(result.result.warnings,[]);
   await page.locator('#transcript').evaluate(n=>n.replaceChildren());result=await run({kind:'open',collectArtifacts:true});assert.deepEqual(result.result.warnings,[]);
+});
+
+async function installEffortProfiles(page){
+  await page.evaluate(()=>{
+    const profiles={'Fable 5.1':['Низкий','Средний','Высокий','Сверхвысокий','Максимальный'],'Opus 5.5':['Низкий','Средний','Высокий','Максимальный'],'Sonnet 5.5':['Низкий','Средний','Высокий'],'Haiku 5.5':[],'Fable 5':['Средний','Высокий'],'Opus 5':['Низкий','Средний']};window.levelReads={};window.modelMenuOpens=0;
+    for(const name of ['Opus 5.5','Fable 5','Opus 5','Opus 999']){const button=document.createElement('button');button.setAttribute('role','menuitemradio');button.dataset.model=name;button.textContent=name;button.onclick=()=>{model=name;refresh();close();};document.querySelector('#other-menu').append(button);}
+    const original=refresh;refresh=()=>{const values=profiles[model]||[];if(values.length&&!values.includes(effort))effort=values[0];original();const trigger=document.querySelector('#effort-menu-trigger');trigger.hidden=values.length===0;document.querySelectorAll('[data-effort]').forEach(n=>n.hidden=!values.includes(n.dataset.effort));if(!values.length){document.querySelector('#model-trigger').textContent=model;document.querySelector('#model-trigger').setAttribute('aria-label','Модель: '+model);}};
+    document.querySelector('#effort-menu-trigger').onclick=()=>{window.levelReads[model]=(window.levelReads[model]||0)+1;document.querySelector('#effort-menu').hidden=false;};
+    document.querySelector('#model-trigger').addEventListener('click',()=>window.modelMenuOpens++);refresh();
+  });
+}
+test('effort levels are learned once for the six allowed models and reused across model switches and page reloads',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await installEffortProfiles(page);
+  const reply=await run({kind:'catalog'});assert.equal(reply.done,true,reply.error);const catalog=reply.result.catalog,cache={version:1,byModel:catalog.byModel};
+  assert.deepEqual(catalog.models,['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5']);assert.equal(catalog.current.model,'Fable 5.1');assert.equal(catalog.current.effort,'medium');
+  assert.deepEqual(cache.byModel['Sonnet 5.5'].efforts,['low','medium','high']);assert.deepEqual(cache.byModel['Fable 5'].efforts,['medium','high']);assert.deepEqual(cache.byModel['Opus 5'].efforts,['low','medium']);assert.deepEqual(cache.byModel['Haiku 5.5'],{available:true,efforts:[]});
+  const reads=await page.evaluate(()=>window.levelReads);assert.deepEqual(reads,{'Fable 5.1':1,'Opus 5.5':1,'Sonnet 5.5':1,'Fable 5':1,'Opus 5':1});
+  for(const model of ['Sonnet 5.5','Haiku 5.5','Opus 5.5','Fable 5.1','Sonnet 5.5']){const changed=await run({kind:'options',catalogCache:cache,settings:{model}});assert.equal(changed.result.catalog.current.model,model);assert.deepEqual(changed.result.catalog.efforts,cache.byModel[model].efforts);}
+  await run({kind:'open',catalogCache:cache});await run({kind:'inspect',catalogCache:cache});assert.deepEqual(await page.evaluate(()=>window.levelReads),reads);
+  await page.reload();await page.addScriptTag({path:new URL('../extension/content.js',import.meta.url).pathname});await installEffortProfiles(page);
+  const opened=await run({kind:'open',catalogCache:cache});assert.deepEqual(opened.result.catalog.byModel,cache.byModel);assert.equal(await page.evaluate(()=>window.modelMenuOpens),0);assert.deepEqual(await page.evaluate(()=>window.levelReads),{});
+  const effort=await run({kind:'options',catalogCache:cache,settings:{model:'Sonnet 5.5',effort:'high'}});assert.equal(effort.result.catalog.current.effort,'high');assert.equal(await page.locator('#model-trigger').innerText(),'Sonnet 5.5 Высокий');
+});
+
+test('an unknown control command never becomes a chat message',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);const result=await run({kind:'future-control-command'});assert.match(result.error,/Неизвестная команда/);assert.equal(result.notSent,true);assert.equal(await page.locator('[data-testid="user-message"]').count(),0);assert.equal(await page.locator('[contenteditable]').innerText(),'');
 });

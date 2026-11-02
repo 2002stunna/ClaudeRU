@@ -1,6 +1,7 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
-  let busy=false, cachedCatalog=null;
+  let busy=false, modelCache={}, managedCache=false;
+  const MODELS=['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5'];
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const all=(selector,root=document)=>[...root.querySelectorAll(selector)];
   const label=node=>{const text=(node?.innerText||node?.textContent||'').replace(/[\uE000-\uF8FF]/g,'').trim();return text||node?.getAttribute('aria-label')||'';};
@@ -21,46 +22,57 @@
   async function closeMenus(){for(let i=0;i<2;i++){(document.activeElement||document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));await delay(25);}}
   async function openModels(){await closeMenus();const button=modelButton();if(!button)throw Error('Не найдено меню модели в Claude. Обновите вкладку на Mac.');button.click();await waitFor(()=>choices().some(n=>n!==button&&n.closest('[role="menu"],[role="listbox"]')),5000);return button;}
   async function submenu(pattern){const item=choices().find(b=>pattern.test(label(b)));if(!item||item.disabled||item.getAttribute('aria-disabled')==='true')return false;const previous=new Set(choices());item.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerType:'mouse'}));item.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));await delay(60);if(item.getAttribute('aria-expanded')!=='true'&&!choices().some(n=>!previous.has(n)))item.click();await waitFor(()=>item.getAttribute('aria-expanded')==='true'||choices().some(n=>!previous.has(n)),5000);return true;}
-  const menuModels=()=>[...new Set(choices().filter(b=>b!==modelButton()).map(b=>modelName(label(b))).filter(Boolean))];
-  async function inspectCatalog(){
-    let trigger=modelButton();if(!trigger){try{trigger=await waitFor(modelButton,8000);}catch{}}if(!trigger)return {models:[],efforts:[],current:{model:'',effort:''},warning:'Меню модели не найдено. Проверьте вход в Claude.'};
-    const current=readState();
-    const models=new Set([current.model]);let efforts=[],warning='';
+  function hydrateCache(cache){
+    managedCache=cache?.version===1;if(!managedCache)return;modelCache={};
+    for(const model of MODELS){const entry=cache.byModel?.[model];if(typeof entry?.available==='boolean'&&Array.isArray(entry.efforts)&&entry.efforts.every(e=>effortNames.some(([name])=>name===e)))modelCache[model]={available:entry.available,efforts:[...entry.efforts]};}
+  }
+  async function selectModel(model,{restore=false}={}){
+    if(!model||same(readState().model,model))return;
+    if(!restore&&!MODELS.includes(model))throw Error('Модель «'+model+'» не найдена в списке ClaudeRU.');
+    await openModels();
+    let item=choices().find(b=>b!==modelButton()&&same(modelName(label(b)),model));
+    if(!item){await submenu(/другие модели|other models|more models/i);item=choices().find(b=>b!==modelButton()&&same(modelName(label(b)),model));}
+    if(!item||item.disabled||item.getAttribute('aria-disabled')==='true'){await closeMenus();const error=Error('Модель «'+model+'» не найдена или недоступна в вашем Claude.');error.unavailable=true;throw error;}
+    item.click();await waitFor(()=>same(readState().model,model),2500);await closeMenus();
+  }
+  const isEffortChoice=n=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(n));
+  async function selectEffort(effort){
+    if(!effort||readState().effort===effort)return;
+    await openModels();
+    const menu=choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)));
+    if(!menu){await closeMenus();throw Error('У выбранной модели не найдено управление уровнем усилий.');}
+    if(effortValue(label(menu))!==effort){
+      await submenu(/уровень усили|effort level|^effort\b/i);
+      const item=choices().find(b=>isEffortChoice(b)&&effortValue(label(b))===effort);
+      if(!item||item.disabled||item.getAttribute('aria-disabled')==='true'){await closeMenus();throw Error('Этот уровень усилий недоступен у выбранной модели.');}
+      item.click();await delay(50);
+    }
+    await closeMenus();if(readState().effort===effort)return;
+    await openModels();const confirmed=effortValue(label(choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)))))||readState().effort;
+    await closeMenus();if(confirmed!==effort)throw Error('Claude не подтвердил уровень усилий. Сообщение не отправлено.');
+  }
+  async function applySettings(settings={}){await selectModel(settings.model);await selectEffort(settings.effort);}
+  async function learnCatalog(){
+    let trigger=modelButton();if(!trigger){try{trigger=await waitFor(modelButton,8000);}catch{}}
+    if(!trigger)return quickCatalog('Меню модели не найдено. Проверьте вход в Claude.');
+    if(MODELS.every(model=>Object.hasOwn(modelCache,model))||readState().streaming)return quickCatalog();
+    const original=readState();let warning='';
     try{
-      await openModels();menuModels().forEach(m=>models.add(m));const selected=choices().find(b=>b!==trigger&&same(modelName(label(b)),current.model));if(selected){const description=label(selected).replace(current.model,'').trim();if(description)current.description=description.slice(0,200);}
-      await submenu(/другие модели|other models|more models/i);menuModels().forEach(m=>models.add(m));
-      await openModels();
-      if(await submenu(/уровень усили|effort level|^effort\b/i)){
-        efforts=[...new Set(choices().map(b=>{const text=label(b);return /^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(text)?effortValue(text):'';}).filter(Boolean))];
+      for(const model of MODELS){
+        if(Object.hasOwn(modelCache,model))continue;
+        try{await selectModel(model);}catch(e){if(e.unavailable){modelCache[model]={available:false,efforts:[]};continue;}throw e;}
+        await openModels();let efforts=[];
+        if(await submenu(/уровень усили|effort level|^effort\b/i))efforts=[...new Set(choices().filter(n=>isEffortChoice(n)&&!n.disabled&&n.getAttribute('aria-disabled')!=='true').map(n=>effortValue(label(n))).filter(Boolean))];
+        modelCache[model]={available:true,efforts};await closeMenus();
       }
-    }catch(e){warning='Не удалось полностью прочитать меню Claude: '+e.message;}finally{await closeMenus();}
-    cachedCatalog={models:[...models].filter(Boolean),efforts,current:{...current,...readState()},...(warning?{warning}:{})};return cachedCatalog;
-  }
-  async function applySettings(settings={}){
-    if(settings.model && !same(modelName(label(modelButton())),settings.model)){
-      await openModels();
-      let item=choices().find(b=>b!==modelButton()&&same(modelName(label(b)),settings.model));
-      if(!item){await submenu(/другие модели|other models|more models/i);item=choices().find(b=>same(modelName(label(b)),settings.model));}
-      if(!item){await closeMenus();throw Error('Модель «'+settings.model+'» не найдена в вашем Claude. Обновите список моделей.');}
-      if(item.getAttribute('aria-disabled')==='true'||item.disabled)throw Error('Эта модель сейчас недоступна в Claude');
-      item.click();await waitFor(()=>same(readState().model,settings.model),2500);await closeMenus();
-      await openModels();let efforts=[];if(await submenu(/уровень усили|effort level|^effort\b/i))efforts=[...new Set(choices().filter(n=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(n))).map(n=>effortValue(label(n))).filter(Boolean))];cachedCatalog={...quickCatalog(),efforts};await closeMenus();
+    }catch(e){warning='Не удалось сохранить все уровни усилий: '+e.message;}
+    finally{
+      await closeMenus();
+      try{await selectModel(original.model,{restore:true});await selectEffort(original.effort);}catch(e){warning='Не удалось восстановить настройки Claude после чтения уровней: '+e.message;}
     }
-    if(settings.effort && readState().effort!==settings.effort){
-      await openModels();
-      const effortMenu=choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)));
-      if(!effortMenu){await closeMenus();throw Error('У выбранной модели не найдено управление уровнем усилий. Обновите меню усилий или выберите другую модель.');}
-      if(effortValue(label(effortMenu))!==settings.effort){
-        await submenu(/уровень усили|effort level|^effort\b/i);
-        const item=choices().find(b=>/^(низки|средни|высоки|сверхвысоки|максимал|low\b|medium\b|high\b|extra[ -]?high|maximum|\bmax\b)/i.test(label(b))&&effortValue(label(b))===settings.effort);
-        if(!item||item.getAttribute('aria-disabled')==='true'||item.disabled){await closeMenus();throw Error('Этот уровень усилий недоступен у выбранной модели.');}
-        item.click();await delay(50);
-      }
-      await closeMenus();if(readState().effort===settings.effort)return;await openModels();
-      const confirmed=effortValue(label(choices().find(b=>/уровень усили|effort level|^effort\b/i.test(label(b)))))||effortValue(label(modelButton()));
-      await closeMenus();if(confirmed!==settings.effort)throw Error('Claude не подтвердил уровень усилий. Сообщение не отправлено.');
-    }
+    return quickCatalog(warning);
   }
+  async function inspectCatalog(){return managedCache?quickCatalog():learnCatalog();}
   function chatURL(){return /^\/chat\/[a-zA-Z0-9-]+$/.test(location.pathname)?location.origin+location.pathname:null;}
   function readState(){
     const trigger=modelButton(),text=(trigger?.getAttribute('aria-label')||'')+' '+label(trigger);
@@ -70,7 +82,7 @@
     return {model:modelName(text),effort:effortValue(text),blocked:notice?notice.slice(0,1500):'',streaming:responses().some(n=>n.getAttribute('data-is-streaming')==='true')||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)))};
   }
   function requireAvailable(){const state=readState();if(state.blocked){const error=Error(state.blocked);error.state=state;throw error;}}
-  function quickCatalog(){return {...(cachedCatalog||{models:[],efforts:[]}),current:readState()};}
+  function quickCatalog(warning=''){const current=readState();return {models:[...MODELS],byModel:JSON.parse(JSON.stringify(modelCache)),efforts:modelCache[current.model]?.efforts||[],current,...(warning?{warning}:{})};}
   async function openChatMenu(){
     await closeMenus();const url=chatURL();
     const link=all('a[href]').find(a=>{try{return new URL(a.href).origin+new URL(a.href).pathname===url;}catch{return false;}});
@@ -234,13 +246,15 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:7});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:8});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;
     (async()=>{
       let submissionAttempted=false;
       try{
+        hydrateCache(message.catalogCache);
+        if(message.kind==='catalog'){respond({done:true,result:{catalog:await learnCatalog()}});return;}
         if(message.kind==='inspect'||message.kind==='options'){
           if(message.kind==='options')await applySettings(message.settings);
           const catalog=message.kind==='options'?quickCatalog():await inspectCatalog();respond({done:true,result:{catalog,chats:chatIndex(),snapshot:snapshot()}});return;
@@ -251,6 +265,7 @@
           const state=snapshot(),generated=await collectFiles({openArtifact:message.collectArtifacts===true});const last=state.messages.findLast(m=>m.role==='assistant');if(last)last.files=generated.files;
           respond({done:true,result:{snapshot:state,catalog:await inspectCatalog(),warnings:generated.warnings}});return;
         }
+        if(message.kind!=='chat')throw Error('Неизвестная команда расширения. Обновите ClaudeRU и вкладку Claude.');
         let input=await waitFor(editor);
         if(input.innerText.trim())throw Error('Во вкладке есть неотправленный черновик. Отправьте или удалите его вручную.');
         await applySettings(message.settings);

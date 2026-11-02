@@ -1,3 +1,4 @@
+import {mockCatalog} from './helpers/catalog.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
@@ -23,7 +24,7 @@ test('files and conversations survive server restart without storing base64 in c
 async function app(t){
   const state={settings:null,files:null,title:'Старый чат'};
   const bridge={status:{connected:true},
-    execute:async job=>job.kind==='manage'?(state.title=job.title||state.title,{applied:true}):job.kind==='open'?{snapshot:{url:job.url,title:state.title,messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:{models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}},chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
+    execute:async job=>job.kind==='manage'?(state.title=job.title||state.title,{applied:true}):job.kind==='open'?{snapshot:{url:job.url,title:state.title,messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:mockCatalog({models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}}),chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
     send:async job=>{if(job.text==='Отклонить до отправки'){const error=Error('Ошибка обработки вложения');error.notSent=true;throw error;}state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',url:'https://claude.ai/chat/new-456'});await job.onFile({name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')});return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
   const auth={salt:'test',hash:scryptSync('test-password','test',64).toString('hex')};
   const server=createApp({auth,bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
@@ -35,7 +36,7 @@ async function app(t){
 }
 test('authenticated workspace: models, old chats, uploads, streamed generated file and shared history',async t=>{
   const {state,get,post,base}=await app(t);
-  const sync=await(await post('/api/sync',{})).json();assert.equal(sync.chats.length,1);assert.equal(sync.catalog.models[0],'Sonnet 5.5');
+  const sync=await(await post('/api/sync',{})).json();assert.equal(sync.chats.length,1);assert.equal(sync.catalog.models[0],'Fable 5.1');
   const imported=sync.chats[0];assert.equal(imported.loaded,false);
   const opened=await(await post('/api/chats/open',{id:imported.id})).json();assert.equal(opened.chat.messages[1].text,'Старый ответ');
   const {chat}=await(await post('/api/chats/new',{})).json();
@@ -62,7 +63,7 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
 
 test('native chat metadata is saved only after confirmation and deleted chats stay deleted after sync',async t=>{
   const store=new DataStore(),chat=await store.create({url:'https://claude.ai/chat/manage-test',title:'Before'}),calls=[];let confirm=false;
-  const bridge={status:{connected:true},execute:async job=>{calls.push(job);if(job.kind==='manage')return confirm?{applied:true}:{};return{chats:[{url:chat.url,title:'Before'}],catalog:{models:[],efforts:[],current:{}}};}};
+  const bridge={status:{connected:true},execute:async job=>{calls.push(job);if(job.kind==='manage')return confirm?{applied:true}:{};return{chats:[{url:chat.url,title:'Before'}],catalog:mockCatalog({models:[],efforts:[],current:{}})};}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});
   cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];
@@ -74,7 +75,7 @@ test('native chat metadata is saved only after confirmation and deleted chats st
 test('one generating chat does not block opening, configuring or sending in another chat',async t=>{
   const store=new DataStore(),a=await store.create(),b=await store.create(),jobs=[];let finish,entered;
   a.url='https://claude.ai/chat/'+a.id;await store.save(a);const started=new Promise(r=>entered=r),hold=new Promise(r=>finish=r);t.after(()=>finish());
-  const bridge={status:{connected:true},execute:async job=>{jobs.push(job);if(job.kind==='inspect')return{chats:[],snapshot:{url:a.url,messages:[{role:'user',text:'Stale snapshot'}]},catalog:{current:{}}};return {catalog:{models:['Fable 5.1'],efforts:['high'],current:{model:'Fable 5.1',effort:job.settings?.effort||'medium',blocked:'credits'}},snapshot:{messages:[],state:{model:'Fable 5.1',effort:'medium',blocked:'credits'}}};},send:async job=>{jobs.push(job);if(job.chatId===a.id){entered();await hold;}job.onUpdate({text:job.chatId,url:'https://claude.ai/chat/'+job.chatId});return {state:{model:'Fable 5.1',effort:'high',blocked:''}};}};
+  const bridge={status:{connected:true},execute:async job=>{jobs.push(job);if(job.kind==='inspect')return{chats:[],snapshot:{url:a.url,messages:[{role:'user',text:'Stale snapshot'}]},catalog:mockCatalog({current:{}})};return {catalog:mockCatalog({models:['Fable 5.1'],efforts:['high'],current:{model:'Fable 5.1',effort:job.settings?.effort||'medium',blocked:'credits'}}),snapshot:{messages:[],state:{model:'Fable 5.1',effort:'medium',blocked:'credits'}}};},send:async job=>{jobs.push(job);if(job.chatId===a.id){entered();await hold;}job.onUpdate({text:job.chatId,url:'https://claude.ai/chat/'+job.chatId});return {state:{model:'Fable 5.1',effort:'high',blocked:''}};}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});
   cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];
@@ -85,4 +86,20 @@ test('one generating chat does not block opening, configuring or sending in anot
   const changed=await(await post('/api/options',{id:b.id,settings:{effort:'high'}})).json();assert.equal(changed.chat.settings.effort,'high');assert.equal(jobs.at(-1).settings.effort,'high');
   const second=await post('/api/chat',{chatId:b.id,text:'Second'});assert.equal(second.status,200);assert.equal(JSON.parse((await second.text()).trim().split('\n').at(-1)).type,'done');
   finish();await(await first).text();assert.equal(a.messages.at(-1).text,a.id);assert.equal(b.messages.at(-1).text,b.id);
+});
+
+test('model cache is shared between chats, survives restart and is only rescanned on explicit request',async t=>{
+  const {MODEL_NAMES,catalogFor}=await import('../model-catalog.mjs');
+  const root=await mkdtemp(join(tmpdir(),'clauderu-catalog-'));t.after(()=>rm(root,{recursive:true,force:true}));let initializations=0;
+  const byModel=Object.fromEntries(MODEL_NAMES.map((name,i)=>[name,{available:true,efforts:i%2?['medium','high']:['low','medium']}]));
+  const bridge={status:{connected:true},execute:async job=>{if(job.kind==='catalog'){initializations++;await new Promise(r=>setTimeout(r,20));return {catalog:{byModel}};}assert.deepEqual(job.catalogCache,{version:1,byModel});return {catalog:catalogFor(job.catalogCache,{model:job.settings?.model||'Fable 5.1',effort:job.settings?.effort||'medium'}),chats:[],snapshot:{messages:[]}};}};
+  const auth={salt:'test',hash:scryptSync('pw','test',64).toString('hex')};
+  async function instance(){const store=new DataStore(root);await store.ready;const server=createApp({auth,bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];return {post,store};}
+  const first=await instance(),a=await first.store.create(),b=await first.store.create();
+  const responses=await Promise.all([first.post('/api/chats/open',{id:a.id}),first.post('/api/chats/open',{id:b.id})]);assert.ok(responses.every(r=>r.ok));assert.equal(initializations,1);
+  let data=await(await first.post('/api/options',{id:a.id,settings:{model:'Sonnet 5.5'}})).json();assert.deepEqual(data.catalog.efforts,byModel['Sonnet 5.5'].efforts);assert.deepEqual(data.catalog.models,MODEL_NAMES);
+  await first.post('/api/sync',{});assert.equal(initializations,1);
+  const second=await instance();assert.deepEqual(second.store.modelCatalog,{version:1,byModel});await second.post('/api/chats/open',{id:a.id});assert.equal(initializations,1);
+  await second.post('/api/sync',{refreshCatalog:true});assert.equal(initializations,2);
+  assert.equal((await second.post('/api/options',{id:a.id,settings:{model:'Opus 999'}})).status,400);
 });

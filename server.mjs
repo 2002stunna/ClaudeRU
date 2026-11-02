@@ -4,11 +4,28 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ClaudeBridge, conversationURL } from './bridge.mjs';
 import { ExtensionBridge } from './extension-bridge.mjs';
+import { MODEL_NAMES, isModelCacheComplete, catalogFor } from './model-catalog.mjs';
 import { DataStore, chatOptions, MAX_FILES, MAX_TOTAL } from './data-store.mjs';
 
 export function createApp({ auth, bridge, secure = false, store = new DataStore() }) {
   const sessions = new Map();let failures = [];const active=new Map();
-  const assets = {'/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
+  let catalogInitialization=null,catalogWarning='';
+  const assets = {'/model-catalog.js':['../model-catalog.mjs','text/javascript; charset=utf-8'], '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
+  async function ensureModelCatalog(){
+    await store.ready;if(!bridge.execute||isModelCacheComplete(store.modelCatalog))return;
+    if(!catalogInitialization){
+      catalogInitialization=(async()=>{const result=await bridge.execute({kind:'catalog',chatId:'catalog-init',catalogCache:store.modelCatalog});catalogWarning=result?.catalog?.warning||'';if(result?.catalog?.byModel)await store.saveModelCatalog({version:1,byModel:result.catalog.byModel});})().finally(()=>{catalogInitialization=null;});
+    }
+    await catalogInitialization;
+  }
+  async function executeWithCatalog(payload){
+    await ensureModelCatalog();const result=await bridge.execute({...payload,catalogCache:store.modelCatalog});
+    if(result?.catalog){
+      result.catalog=catalogFor(store.modelCatalog,result.catalog.current,result.catalog.warning||catalogWarning);
+    }
+    return result;
+  }
+  function allowedSettings(value){const settings=chatOptions(value);if(settings.model&&!MODEL_NAMES.includes(settings.model))throw Error('Выберите одну из шести моделей в меню ClaudeRU');return settings;}
   async function applySnapshot(chat,snapshot) {
     if(!snapshot||typeof snapshot!=='object')throw Error('Расширение не вернуло содержимое чата');
     if(snapshot.url)chat.url=conversationURL(snapshot.url);
@@ -114,10 +131,10 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         const key=body.id;if(active.has(key))return json(409,{error:'В этом чате ещё выполняется действие'});
         if(!bridge.execute)return json(400,{error:'Обновите расширение ClaudeRU'});active.set(key,'options');
         try{
-          const chat=await store.get(key),settings=chatOptions(body.settings);
-          const result=await bridge.execute({kind:'options',chatId:key,url:chat.url,settings});
+          const chat=await store.get(key),settings=allowedSettings(body.settings);
+          const result=await executeWithCatalog({kind:'options',chatId:key,url:chat.url,settings});
           if(!result?.catalog?.current)throw Error('Не получены фактические настройки Claude');
-          applyState(chat,result.catalog.current);chat.catalog={...result.catalog,models:[...new Set([...(chat.catalog?.models||[]),...(result.catalog.models||[])])]};await store.save(chat);return json(200,{catalog:result.catalog,chat});
+          applyState(chat,result.catalog.current);chat.catalog=result.catalog;await store.save(chat);return json(200,{catalog:result.catalog,chat});
         }catch(e){return json(400,{error:e.message});}finally{active.delete(key);}
       }
       if(req.url==='/api/chats/state'){
@@ -131,16 +148,17 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         active.set(key,'open');
         try {
           if(req.url==='/api/sync'){
-            const result=await bridge.execute({kind:'inspect',chatId:'sync'});
+            if(body.refreshCatalog===true){if(catalogInitialization)await catalogInitialization;await store.saveModelCatalog({version:1,byModel:{}},{replace:true});}
+            const result=await executeWithCatalog({kind:'inspect',chatId:'sync'});
             if(!result||!Array.isArray(result.chats))throw Error('Обновите расширение ClaudeRU и вкладку Claude');
             await store.importIndex(result.chats);
             if(result.snapshot?.url){const chat=await store.create({url:result.snapshot.url,title:result.snapshot.title});if(!chat.deleted&&!active.has(chat.id))await applySnapshot(chat,result.snapshot);}
             return json(200,{chats:await store.list(),catalog:result.catalog});
           }
           const chat=await store.get(body.id);
-          const result=await bridge.execute({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true});
+          const result=await executeWithCatalog({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true});
           if(result?.snapshot)await applySnapshot(chat,result.snapshot);chat.unread=false;
-          if(result?.catalog){applyState(chat,result.catalog.current);chat.catalog={...result.catalog,models:[...new Set([...(chat.catalog?.models||[]),...(result.catalog.models||[])])]};await store.save(chat);}
+          if(result?.catalog){applyState(chat,result.catalog.current);chat.catalog=result.catalog;await store.save(chat);}
           return json(200,{chat,catalog:result.catalog,warnings:result.warnings||[]});
         }catch(e){return json(400,{error:e.message});}finally{active.delete(key);}
       }
@@ -150,9 +168,10 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           if(typeof body.text!=='string'||body.text.length>20000||(!body.text.trim()&&!(body.fileIds?.length)))throw Error('Введите сообщение до 20 000 символов или добавьте файл');
           if(body.url)conversationURL(body.url);
           if(bridge.status&&!bridge.status.connected)throw Error(bridge.status.error||'Расширение не подключено. Подключите вкладку Claude на Mac.');
-          settings=chatOptions(body.settings);files=await store.wireFiles(body.fileIds);
+          settings=allowedSettings(body.settings);files=await store.wireFiles(body.fileIds);
           if(!bridge.execute&&(files.length||settings.model||settings.effort))throw Error('Настройки и файлы поддерживаются в режиме расширения. Запустите сервер без BRIDGE_MODE=browser.');
           if(!bridge.execute&&active.size)return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
+          await ensureModelCatalog();
           chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
           if(active.has(chat.id))return json(409,{error:'В этом чате уже формируется ответ. Дождитесь его завершения.'});
         }catch(e){return json(400,{error:e.message});}
@@ -164,7 +183,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','X-Accel-Buffering':'no'});
         const write=data=>{if(!res.destroyed)res.write(JSON.stringify(data)+'\n');};let generatedSize=0;
         try{
-          const result=await bridge.send({chatId:chat.id,text:body.text,url:chat.url,settings,files,
+          const result=await bridge.send({chatId:chat.id,text:body.text,url:chat.url,settings,files,catalogCache:store.modelCatalog,
             onUpdate:data=>{answer.text=data.text;if(data.url)chat.url=conversationURL(data.url);write({type:'update',...data});},
             onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});},
             onWarning:warning=>write({type:'warning',warning})});

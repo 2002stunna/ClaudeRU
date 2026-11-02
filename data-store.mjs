@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { conversationURL } from './bridge.mjs';
+import { normalizeModelCache } from './model-catalog.mjs';
 
 export const MAX_FILE = 20 * 1024 * 1024;
 export const MAX_TOTAL = 25 * 1024 * 1024;
@@ -27,12 +28,13 @@ export function chatOptions(value = {}) {
   return {model,effort};
 }
 export class DataStore {
-  constructor(root = null) { this.root=root;this.chats=[];this.files=new Map();this.queue=Promise.resolve();this.ready=this.load(); }
+  constructor(root = null) { this.root=root;this.chats=[];this.files=new Map();this.modelCatalog=normalizeModelCache(null);this.queue=Promise.resolve();this.ready=this.load(); }
   async load() {
     if(!this.root)return;
     await mkdir(join(this.root,'files'),{recursive:true,mode:0o700});
     try { this.chats=JSON.parse(await readFile(join(this.root,'chats.json'),'utf8'));if(!Array.isArray(this.chats))throw Error('Некорректный файл истории'); }
     catch(e){if(e.code!=='ENOENT')throw e;}
+    try{this.modelCatalog=normalizeModelCache(JSON.parse(await readFile(join(this.root,'model-catalog.json'),'utf8')));}catch(e){if(e.code!=='ENOENT')throw e;}
   }
   async persist() {
     if(!this.root)return;
@@ -42,6 +44,14 @@ export class DataStore {
       await writeFile(tmp,serialized,{mode:0o600});await rename(tmp,join(this.root,'chats.json'));
     });
     this.queue=next.catch(()=>{});return next;
+  }
+  async saveModelCatalog(value,{replace=false}={}){
+    await this.ready;const next=normalizeModelCache(value);
+    this.modelCatalog={version:1,byModel:{...(replace?{}:this.modelCatalog.byModel),...next.byModel}};
+    if(!this.root)return this.modelCatalog;
+    const serialized=JSON.stringify(this.modelCatalog);
+    const write=this.queue.then(async()=>{const tmp=join(this.root,'model-catalog.json.tmp');await writeFile(tmp,serialized,{mode:0o600});await rename(tmp,join(this.root,'model-catalog.json'));});
+    this.queue=write.catch(()=>{});await write;return this.modelCatalog;
   }
   async list(){await this.ready;return this.chats.filter(c=>!c.deleted);}
   async get(id){await this.ready;const chat=this.chats.find(c=>c.id===id&&!c.deleted);if(!chat)throw Error('Чат не найден');return chat;}
