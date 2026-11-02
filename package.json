@@ -12,7 +12,8 @@
     "start": "node server.mjs",
     "test": "node --test",
     "browser:yandex": "node browser.mjs yandex",
-    "browser:chromium": "node browser.mjs chromium"
+    "browser:chromium": "node browser.mjs chromium",
+    "diagnose:yandex": "node scripts/diagnose-yandex.mjs"
   },
   "dependencies": {
     "playwright": "1.56.1"
