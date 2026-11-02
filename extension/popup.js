@@ -1,4 +1,5 @@
 const status = document.getElementById('status');
+document.getElementById('version').textContent='v'+chrome.runtime.getManifest().version;
 chrome.storage.local.get(['token','lastStatus']).then(c=>{document.getElementById('token').value=c.token || '';status.textContent=c.lastStatus || 'Не подключено';});
 document.getElementById('connect').onclick=async()=>{
   try {
@@ -8,7 +9,7 @@ document.getElementById('connect').onclick=async()=>{
     if(!/^[a-f0-9]{64}$/.test(token))throw Error('Вставьте полный код из терминала сервера.');
     const response=await chrome.runtime.sendMessage({type:'connect',token,tabId:tab.id});
     if(response.error)throw Error(response.error);
-    status.textContent='Подключение начато. Статус появится на сайте ClaudeRU.';
+    status.textContent='Связь с вкладкой Claude установлена.';
   }catch(e){status.textContent=e.message;}
 };
 document.getElementById('disconnect').onclick=async()=>{await chrome.runtime.sendMessage({type:'disconnect'});document.getElementById('token').value='';status.textContent='Отключено';};

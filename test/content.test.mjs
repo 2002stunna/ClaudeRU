@@ -107,3 +107,14 @@ test('template stale frames are ignored and catalog discovery waits for the acti
   });
   const inspected=await run({kind:'inspect'});assert.equal(inspected.done,true,inspected.error);assert.equal(inspected.result.catalog.current.model,'Fable 5.1');assert.equal(inspected.result.snapshot.messages.length,0);assert.ok(!JSON.stringify(inspected).includes('stale private'));
 });
+test('a rejected incompatible connection leaves the user message in the composer and out of history',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');let sent=false;
+  const bridge={status:{connected:false,error:'Работает старая версия расширения. Обновите ClaudeRU.'},send:async()=>{sent=true;}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('test-password');await page.locator('#login-form button').click();await page.locator('#app').waitFor({state:'visible'});
+  await page.locator('#prompt').fill('Не потеряй это сообщение');await page.locator('#send').click();await page.waitForFunction(()=>document.querySelector('#prompt').value==='Не потеряй это сообщение'&&!document.querySelector('#send').disabled);
+  assert.equal(await page.locator('article').count(),0);assert.equal(sent,false);assert.match(await page.locator('#status').textContent(),/старая версия/);
+  const histories=await page.evaluate(async()=>await(await fetch('/api/chats')).json());assert.ok(histories.chats.every(chat=>chat.messages.length===0));
+});

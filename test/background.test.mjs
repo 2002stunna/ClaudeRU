@@ -22,10 +22,17 @@ test('background carries full job and file events between selected tab and authe
       await new Promise(resolve=>handler({type:'file',id:job.id,file:{name:'output.txt',data:'aGk='}},{tab:{id:7}},ack=>{assert.equal(ack.ok,true);resolve();}));
       return {done:true,result:{url:job.url,title:'Done'}};
     }},
-    alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}},getURL:p=>'chrome-extension://test/'+p}
+    alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.4.1'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}},getURL:p=>'chrome-extension://test/'+p}
   };
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});
   await completion;
   assert.equal(navigation.length,0);assert.equal(jobs.length,1);assert.equal(jobs[0].settings.effort,'high');assert.equal(jobs[0].files[0].name,'input.txt');
   assert.equal(outgoing[0].type,'file');assert.equal(outgoing[0].file.name,'output.txt');assert.equal(outgoing[1].type,'done');assert.equal(outgoing[1].result.title,'Done');
+});
+test('background checks stale page readiness before requesting or running a job',async()=>{
+  const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
+  let config={token:'a'.repeat(64),tabId:7},completed;const done=new Promise(r=>completed=r),messages=[];
+  const chrome={storage:{local:{get:async()=>config,set:async data=>{assert.match(data.lastStatus,/Обновите вкладку/);config={};completed();},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/new'}),sendMessage:async(id,message)=>{messages.push(message.type);return{ready:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.4.1'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+  const fetch=async(url,options)=>{assert.ok(url.endsWith('/poll'));assert.equal(options.headers['X-ClaudeRU-Protocol'],'4');assert.notEqual(options.headers['X-ClaudeRU-Page-Protocol'],'4');return{ok:false,status:426,json:async()=>({error:'Обновите вкладку Claude'})};};
+  vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.deepEqual(messages,['ready']);
 });

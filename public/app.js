@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);
-let chats=[],selected=null,operation=false,sending=null,catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent';
+let chats=[],selected=null,operation=false,sending=null,catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
 const current=()=>chats.find(c=>c.id===selected);
 const draft=()=>{if(!drafts.has(selected))drafts.set(selected,{text:'',files:[]});return drafts.get(selected);};
@@ -124,10 +124,10 @@ $('file-input').onchange=()=>attachFiles($('file-input').files);
 $('chat-form').ondragover=e=>{e.preventDefault();$('chat-form').classList.add('dragging');};$('chat-form').ondragleave=()=>$('chat-form').classList.remove('dragging');$('chat-form').ondrop=e=>{e.preventDefault();$('chat-form').classList.remove('dragging');void attachFiles(e.dataTransfer.files);};
 $('chat-form').onsubmit=async e=>{
   e.preventDefault();if(operation||sending)return;const chat=current(),pending=draft(),text=$('prompt').value.trim();if(!chat||(!text&&!pending.files.length))return;
-  const files=[...pending.files];pending.text='';pending.files=[];$('prompt').value='';renderAttachments();sending=chat.id;status('Claude отвечает…');
+  const previousTitle=chat.title,files=[...pending.files];pending.text='';pending.files=[];$('prompt').value='';renderAttachments();sending=chat.id;status('Claude отвечает…');
   if(!chat.customTitle&&!chat.messages.length&&text)chat.title=text.slice(0,60);chat.messages.push({role:'user',text,files});const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);renderMessages();renderSidebar();updateControls();const warnings=[];
   try{
-    const res=await post('/api/chat',{chatId:chat.id,text,fileIds:files.map(f=>f.id),settings:chat.settings||{}});if(!res.ok)throw Error((await res.json()).error);
+    const res=await post('/api/chat',{chatId:chat.id,text,fileIds:files.map(f=>f.id),settings:chat.settings||{}});if(!res.ok){const data=await res.json();const error=Error(data.error);error.notSent=true;throw error;}
     const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='',done=false;
     while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;
       while((end=buffer.indexOf('\n'))>=0){const event=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);
@@ -140,7 +140,7 @@ $('chat-form').onsubmit=async e=>{
       }
     }
     if(!done)throw Error('Соединение прервано. Проверьте чат на Mac перед повторной отправкой.');status(warnings.join(' '));
-  }catch(e){answer.error=e.message;status(e.message);if(selected===chat.id)renderMessages();}
+  }catch(e){if(e.notSent){chat.title=previousTitle;const index=chat.messages.indexOf(answer);if(index>=1)chat.messages.splice(index-1,2);pending.text=text;pending.files=files;if(selected===chat.id){$('prompt').value=text;renderAttachments();}}else answer.error=e.message;status(e.message);if(selected===chat.id)renderMessages();}
   finally{sending=null;updateControls();renderSidebar();}
 };
 $('close-preview').onclick=()=>$('file-preview').close();
@@ -174,6 +174,6 @@ document.addEventListener('keydown',e=>{
   if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){const menu=document.activeElement?.closest('[role="menu"]');if(!menu)return;const buttons=[...menu.querySelectorAll('button:not(:disabled)')].filter(b=>b.getClientRects().length);if(!buttons.length)return;e.preventDefault();const i=buttons.indexOf(document.activeElement);const index=e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;buttons[index].focus();}
   if(e.key==='ArrowLeft'&&!$('model-menu').hidden){closeSubmenus();$('other-models-trigger').focus();}
 });
-async function bridgeStatus(){try{const r=await fetch('/api/bridge');if(!r.ok)return;const state=await r.json();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.connected&&!state.busy&&!catalog&&!operation&&!sending&&Date.now()-lastSyncAttempt>20000)await sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}}
+async function bridgeStatus(){try{const r=await fetch('/api/bridge');if(!r.ok)return;const state=await r.json();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!sending){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&!catalog&&!operation&&!sending&&Date.now()-lastSyncAttempt>20000)await sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}}
 setInterval(bridgeStatus,10000);
 fetch('/api/session').then(r=>r.json()).then(s=>{if(s.authenticated)showApp();}).catch(()=>{$('login-error').textContent='Нет связи с домашним Mac';});

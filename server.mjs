@@ -114,6 +114,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         try{
           if(typeof body.text!=='string'||body.text.length>20000||(!body.text.trim()&&!(body.fileIds?.length)))throw Error('Введите сообщение до 20 000 символов или добавьте файл');
           if(body.url)conversationURL(body.url);
+          if(bridge.status&&!bridge.status.connected)throw Error(bridge.status.error||'Расширение не подключено. Подключите вкладку Claude на Mac.');
           settings=chatOptions(body.settings);files=await store.wireFiles(body.fileIds);
           if(!bridge.execute&&(files.length||settings.model||settings.effort))throw Error('Настройки и файлы поддерживаются в режиме расширения. Запустите сервер без BRIDGE_MODE=browser.');
           if(active)return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
