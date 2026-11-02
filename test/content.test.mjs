@@ -387,3 +387,32 @@ test('a follow-up button mentioning a PDF is never clicked as a document card',{
   const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Готово — burger.pdf.<button id="followup">Переделать burger.pdf?</button></div>';window.followupClicks=0;document.querySelector('#followup').onclick=()=>window.followupClicks++;});
   const result=await run({kind:'open'});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.followupClicks),0);assert.deepEqual(result.result.warnings,[]);
 });
+
+test('a PDF title button and its sibling document type are handled as one native file card',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);const pdf=Buffer.from('%PDF-1.7\nburger from a sibling card\n%%EOF');
+  await page.route('https://claude.ai/files/sibling-card',route=>route.fulfill({contentType:'application/pdf',headers:{'Content-Disposition':'attachment; filename="burger.pdf"'},body:pdf}));
+  await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message"><p>Вот burger.pdf ещё раз.</p><section class="native-file"><button>Burger</button><div><span>Документ · PDF</span></div></section></div>';
+    document.querySelector('.native-file button').onclick=()=>{const iframe=document.createElement('iframe');iframe.src='/files/sibling-card';document.body.append(iframe);};
+  });
+  const result=await run({kind:'open'});assert.equal(result.done,true,result.error);const message=result.result.snapshot.messages.at(-1);assert.equal(message.files.length,1);assert.equal(message.files[0].name,'burger.pdf');assert.deepEqual(Buffer.from(message.files[0].data,'base64'),pdf);assert.equal(message.text,'Вот burger.pdf ещё раз.');
+});
+test('deletion waits for a delayed native confirmation before confirming once',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await installChatActions(page);await page.evaluate(()=>{
+    window.deleteConfirmations=0;document.querySelector('aside button').addEventListener('click',()=>{
+      const item=[...document.querySelectorAll('[role="menuitem"]')].find(n=>n.textContent==='Удалить');item.onclick=()=>{document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=true);setTimeout(()=>{
+        const dialog=document.createElement('div');dialog.setAttribute('role','alertdialog');const button=document.createElement('button');button.textContent='Удалить чат';button.onclick=()=>{window.deleteConfirmations++;setTimeout(()=>{document.querySelector('aside a[href="/chat/current-123"]').parentElement.remove();dialog.remove();},150);};dialog.append(button);document.body.append(dialog);
+      },350);};
+    });
+  });
+  const result=await run({kind:'manage',action:'delete',url:'https://claude.ai/chat/current-123'});assert.equal(result.result?.applied,true,result.error);assert.equal(await page.evaluate(()=>window.deleteConfirmations),1);
+});
+test('missing controls in the target row never open another chat menu',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{window.otherMenuClicks=0;const more=document.createElement('button');more.setAttribute('aria-label','Дополнительные параметры: другой чат');more.onclick=()=>window.otherMenuClicks++;document.querySelector('aside').append(more);});
+  const result=await run({kind:'manage',action:'delete',url:'https://claude.ai/chat/current-123'});assert.ok(result.error);assert.equal(await page.evaluate(()=>window.otherMenuClicks),0);
+});
+
+test('a native deletion failure is never interpreted as a successful deletion',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await installChatActions(page);await page.evaluate(()=>{document.querySelector('aside button').addEventListener('click',()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(n=>n.textContent==='Удалить');item.onclick=()=>{document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=true);const notice=document.createElement('div');notice.setAttribute('role','alert');notice.textContent='Чат не удалён';document.body.append(notice);};});});
+  const result=await run({kind:'manage',action:'delete',url:'https://claude.ai/chat/current-123'});assert.match(result.error,/не удалён/);assert.equal(result.result?.applied,undefined);assert.equal(await page.locator('aside a[href="/chat/current-123"]').count(),1);
+});
