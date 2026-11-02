@@ -17,7 +17,7 @@ function fileCard(file,removable=false){
   const card=document.createElement('div');card.className='file-card';
   const icon=document.createElement('span');icon.className='file-icon';icon.textContent=file.name.split('.').at(-1).slice(0,5).toUpperCase();
   const info=document.createElement('div'),name=document.createElement('strong'),detail=document.createElement('small');name.textContent=file.name;detail.textContent=formatSize(file.size);info.append(name,detail);
-  const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(file.id);download.download=file.name;download.textContent='↓';download.title='Скачать '+file.name;download.setAttribute('aria-label','Скачать '+file.name);
+  const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(file.id);download.download=file.name;download.textContent=file.type==='application/pdf'?'Скачать':'↓';if(file.type==='application/pdf')download.classList.add('file-download-label');download.title='Скачать '+file.name;download.setAttribute('aria-label','Скачать '+file.name);
   card.append(icon,info,download);
   if(/\.(txt|md|json|csv|py|js|ts|css|html|sql|sh|xml|yaml|yml)$/i.test(file.name)){
     const preview=document.createElement('button');preview.type='button';preview.textContent='Просмотр';preview.onclick=async()=>{try{const res=await fetch('/api/files/'+encodeURIComponent(file.id));if(!res.ok)throw Error('Не удалось открыть файл');$('preview-name').textContent=file.name;$('preview-text').textContent=(await res.text()).slice(0,500000);$('preview-download').href=download.href;$('preview-download').download=file.name;$('file-preview').showModal();}catch(e){status(e.message);}};card.append(preview);

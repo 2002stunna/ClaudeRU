@@ -1,15 +1,17 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
-  let busy=false, modelCache={}, managedCache=false;
+  let busy=false, modelCache={}, managedCache=false, activeJobId=null;
   const MODELS=['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5'];
-  const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  // Timers in a hidden Claude tab can be throttled for seconds. The extension's
+  // worker owns short waits; readiness is still checked in the actual page.
+  const delay=async ms=>{let reply;try{reply=await chrome.runtime.sendMessage({type:'wait',id:activeJobId,ms});}catch{}if(reply?.ok!==true)throw Error('Связь с расширением прервана. Обновите расширение ClaudeRU и вкладку Claude.');};
   const all=(selector,root=document)=>[...root.querySelectorAll(selector)];
   const label=node=>{const text=(node?.innerText||node?.textContent||'').replace(/[\uE000-\uF8FF]/g,'').trim();return text||node?.getAttribute('aria-label')||'';};
   const visible=node=>!!node && node.getClientRects().length>0 && getComputedStyle(node).visibility!=='hidden';
   const editor=()=>all('[data-testid="chat-input"][contenteditable="true"],[contenteditable="true"][role="textbox"], div.ProseMirror[contenteditable="true"]').find(visible);
   const responses=()=>{const nodes=all('[data-testid="assistant-message"],.font-claude-response');return nodes.filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="assistant-message"],.font-claude-response'));};
   function messageText(node){
-    const read=n=>{if(n.nodeType===3)return n.textContent;if(n.nodeType!==1)return '';if(n.matches('button,[aria-hidden="true"],.sr-only,[data-testid="message-actions"],[data-testid="user-message-actions"],script,style'))return '';if(n.tagName==='BR')return '\n';if(n.tagName==='PRE')return '\n'+n.textContent+'\n';const text=[...n.childNodes].map(read).join('');return /^(P|DIV|LI|H[1-6]|SECTION|ARTICLE|BLOCKQUOTE)$/.test(n.tagName)?text+'\n':text;};
+    const read=n=>{if(n.nodeType===3)return n.textContent;if(n.nodeType!==1)return '';if(n.matches('button,[role="button"],[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="attachment"],[aria-hidden="true"],.sr-only,[data-testid="message-actions"],[data-testid="user-message-actions"],script,style'))return '';if(n.tagName==='BR')return '\n';if(n.tagName==='PRE')return '\n'+n.textContent+'\n';const text=[...n.childNodes].map(read).join('');return /^(P|DIV|LI|H[1-6]|SECTION|ARTICLE|BLOCKQUOTE)$/.test(n.tagName)?text+'\n':text;};
     return read(node).replace(/\n{3,}/g,'\n\n').trim();
   }
   const modelName=text=>text.match(/(?:Claude\s+)?(?:Opus|Sonnet|Haiku|Fable)\s+\d+(?:\.\d+)*(?:\s+(?:Thinking|Extended))?/i)?.[0]?.trim()||'';
@@ -195,8 +197,48 @@
   const turnKey=node=>node.getAttribute('data-message-id')||node.getAttribute('data-turn-key')||node.id||node;
   function base64(bytes){let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(text);}
   const textFile=(name,text)=>({name,type:'text/plain',data:base64(new TextEncoder().encode(text))});
+  const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
+  function pdfCardName(card){
+    const parts=[card.getAttribute('data-filename'),label(card.querySelector('[data-testid="file-name"],[data-testid="filename"]')),label(card).replace(/(?:document|документ)[\s\S]*$/i,'').trim(),card.getAttribute('title'),card.getAttribute('aria-label'),...label(card).split('\n')].filter(Boolean);
+    return parts.find(t=>/^[^\n]+\.pdf$/i.test(t.trim()))?.trim()||((parts.find(t=>!/(?:document|документ|pdf|скачать|download)/i.test(t))||'document').trim()+'.pdf');
+  }
+  function pdfReferences(scope,name){
+    const selector='a[href],iframe[src],embed[src],object[data],[data-download-url],[data-file-url]';
+    const nodes=[...(scope.matches?.(selector)?[scope]:[]),...all(selector,scope)];
+    return nodes.flatMap(node=>{
+      const value=node.getAttribute('data-download-url')||node.getAttribute('data-file-url')||node.getAttribute('href')||node.getAttribute('src')||node.getAttribute('data');
+      if(!value)return [];let url;try{url=new URL(value,location.href);}catch{return [];}
+      // Some PDF viewers expose the document URL in a file= query parameter.
+      const source=url.searchParams.get('file');if(source){try{url=new URL(source,url);}catch{return [];}}
+      url.hash='';return [{href:url.href,download:node.getAttribute('download')||name,innerText:name,requirePDF:true}];
+    });
+  }
+  async function pdfCardFiles(root){
+    const references=[],warnings=[];
+    const found=all(pdfCardSelector,root).filter(n=>visible(n)&&((n.matches('[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[data-filename]')&&/\bpdf\b/i.test(label(n)+' '+(n.getAttribute('data-filename')||'')))||/(?:документ|document)\s*[·•.\-:]?\s*pdf\b/i.test(label(n))));
+    const cards=found.filter(n=>!found.some(parent=>parent!==n&&parent.contains(n)));
+    for(const card of cards.slice(0,5)){
+      const name=pdfCardName(card),direct=pdfReferences(card,name);
+      if(direct.length){references.push(...direct.map(r=>({...r,pdfGroup:card})));continue;}
+      const panelSelector='[data-testid="file-preview"],[data-testid="document-preview"],[data-testid="file-viewer"],[data-testid="document-viewer"],[data-testid="artifact-panel"],[role="dialog"],iframe[src],embed[src],object[data]';
+      const signature=n=>[n.textContent,...pdfReferences(n,name).map(r=>r.href)].join('\n');
+      const previous=new Map(all(panelSelector).filter(visible).map(n=>[n,signature(n)]));
+      const controlled=document.getElementById(card.getAttribute('aria-controls')||'');if(visible(controlled))previous.set(controlled,signature(controlled));
+      const wasOpen=card.getAttribute('aria-expanded')==='true'||card.getAttribute('aria-pressed')==='true';
+      if(!wasOpen)card.click();
+      try{
+        const sources=await waitFor(()=>{
+          const id=card.getAttribute('aria-controls'),panels=id?[document.getElementById(id)]:all(panelSelector);
+          const current=panels.filter(n=>visible(n)&&(wasOpen||!previous.has(n)||previous.get(n)!==signature(n)));
+          const links=current.flatMap(n=>pdfReferences(n,name));return links.length?links:null;
+        },3500);
+        references.push(...sources.map(r=>({...r,pdfGroup:card})));
+      }catch{warnings.push('Не удалось получить PDF «'+name+'» из Claude. Откройте документ на Mac и обновите этот чат.');}
+    }
+    return {references,warnings};
+  }
   async function collectFiles({openArtifact=false}={}){
-    const files=[],warnings=[];let total=0;const seen=new Set();
+    const files=[],warnings=[];let total=0;const seen=new Set(),downloadedPDFs=new Set(),pdfErrors=new Map();
     const root=responses().at(-1);if(!root)return {files,warnings};
     const artifact=all('[data-testid="artifact-button"],button[aria-label*="artifact" i],button[aria-label*="артефакт" i]',root).find(n=>visible(n)&&(n.dataset.testid==='artifact-button'||/^(open artifact|открыть артефакт|artifact\b|артефакт(?:\s|:|$))/i.test(label(n))));
     let panel=null;
@@ -215,13 +257,14 @@
       }catch{/* Missing export does not invalidate the assistant's answer. */}
     }
     const linkSelector='a[download],a[href^="blob:"],a[href*="/download"],a[href*="/files/"],a[href*="/artifacts/"]';
-    const links=[...new Set([...all(linkSelector,root),...(panel?all(linkSelector,panel):[])])].filter(visible);
+    const pdfs=await pdfCardFiles(root);warnings.push(...pdfs.warnings);
+    const links=[...[...new Set([...all(linkSelector,root),...(panel?all(linkSelector,panel):[])])].filter(visible),...pdfs.references];
     for(const a of links){
-      if(files.length>=5)break;
+      if(files.length>=5)break;if(a.pdfGroup&&downloadedPDFs.has(a.pdfGroup))continue;
       const url=new URL(a.href,location.href);
       if(seen.has(url.href))continue;seen.add(url.href);
       if(url.username||url.password||!((url.protocol==='https:'&&url.origin===location.origin)||(url.protocol==='blob:'&&url.origin===location.origin))){warnings.push('Файл «'+(a.innerText||'вложение')+'» находится на другом домене и не перенесён.');continue;}
-      let name=a.getAttribute('download')||a.innerText.trim()||url.pathname.split('/').at(-1)||'file';
+      let name=a.download||a.getAttribute?.('download')||a.innerText.trim()||url.pathname.split('/').at(-1)||'file';
       try{
         const response=await fetch(url.href,{credentials:'same-origin',redirect:'error'});if(!response.ok)throw Error('HTTP '+response.status);
         const disposition=response.headers.get('Content-Disposition')||'';
@@ -230,9 +273,14 @@
         const reader=response.body.getReader(),chunks=[];let size=0;
         while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>20*1024*1024||total+size>25*1024*1024){await reader.cancel();throw Error('превышен лимит размера файлов');}chunks.push(value);}
         const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
-        total+=size;files.push({name,type:(response.headers.get('Content-Type')||'application/octet-stream').split(';')[0],data:base64(bytes)});
-      }catch(e){warnings.push('Не удалось перенести «'+name+'»: '+e.message);}
+        const isPDF=new TextDecoder('ascii').decode(bytes.subarray(0,1024)).includes('%PDF-');
+        if((a.requirePDF||/\.pdf$/i.test(name))&&!isPDF)throw Error('вместо PDF получена страница просмотра');
+        if(isPDF&&!/\.pdf$/i.test(name))name+='.pdf';
+        total+=size;files.push({name,type:isPDF?'application/pdf':(response.headers.get('Content-Type')||'application/octet-stream').split(';')[0],data:base64(bytes)});
+        if(a.pdfGroup){downloadedPDFs.add(a.pdfGroup);pdfErrors.delete(a.pdfGroup);}
+      }catch(e){const warning='Не удалось перенести «'+name+'»: '+e.message;if(a.pdfGroup)pdfErrors.set(a.pdfGroup,warning);else warnings.push(warning);}
     }
+    warnings.push(...pdfErrors.values());
     // Export code as a file; never execute generated HTML/JS in our interface.
     const codeNodes=[...all('pre code',root),...(panel?all(codeSelector,panel):[])].filter(visible);
     for(const [i,code] of [...new Set(codeNodes)].entries()){
@@ -246,10 +294,10 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:8});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:9});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
-    if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;
+    if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;activeJobId=message.id;
     (async()=>{
       let submissionAttempted=false;
       try{
@@ -316,7 +364,7 @@
           }
         }
         throw Error('Время ожидания истекло. Проверьте чат на Mac перед повторной отправкой.');
-      }catch(e){respond({error:e.message,notSent:e.notSent===true||!submissionAttempted,state:e.state});}finally{busy=false;}
+      }catch(e){respond({error:e.message,notSent:e.notSent===true||!submissionAttempted,state:e.state});}finally{busy=false;activeJobId=null;}
     })();return true;
   });
 })();

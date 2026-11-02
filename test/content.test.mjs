@@ -12,7 +12,7 @@ const html=await readFile(new URL('./fixtures/claude.html',import.meta.url),'utf
 async function fixture(t){
   const context=await browser.newContext();t.after(()=>context.close());
   await context.route('https://claude.ai/**',route=>route.fulfill({status:200,contentType:route.request().url().includes('/files/')?'text/csv':'text/html',body:route.request().url().includes('/files/')?'column\nvalue':html}));
-  await context.addInitScript(()=>{window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{window.events.push({...event,at:performance.now()});return{ok:true};}}};});
+  await context.addInitScript(()=>{const workerClock=window.setTimeout.bind(window);window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{if(event.type==='wait')return new Promise(resolve=>workerClock(()=>resolve({ok:true}),event.ms));window.events.push({...event,at:performance.now()});return{ok:true};}}};});
   const page=await context.newPage();await page.goto('https://claude.ai/chat/current-123');
   await page.addScriptTag({path:new URL('../extension/content.js',import.meta.url).pathname});
   const run=job=>page.evaluate(message=>new Promise(resolve=>window.extensionHandler({...message,type:'run',id:'test-job'},{id:'clauderu-test'},resolve)),job);
@@ -315,4 +315,75 @@ test('effort levels are learned once for the six allowed models and reused acros
 
 test('an unknown control command never becomes a chat message',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);const result=await run({kind:'future-control-command'});assert.match(result.error,/Неизвестная команда/);assert.equal(result.notSent,true);assert.equal(await page.locator('[data-testid="user-message"]').count(),0);assert.equal(await page.locator('[contenteditable]').innerText(),'');
+});
+
+test('ready image and document attachments are submitted promptly when page timers are throttled',{skip:!executable},async t=>{
+  for(const file of [{name:'photo.png',type:'image/png',data:tinyPNG},{name:'report.pdf',type:'application/pdf',data:Buffer.from('%PDF-test').toString('base64')}]){
+    const {page,run}=await fixture(t);
+    await page.evaluate(()=>{
+      const clock=window.setTimeout.bind(window),send=document.querySelector('#send');
+      document.querySelector('#upload').onchange=event=>{
+        window.uploadStartedAt=performance.now();send.disabled=true;
+        const preview=document.createElement(event.target.files[0].type.startsWith('image/')?'img':'span');
+        if(preview.tagName==='IMG'){preview.src=URL.createObjectURL(event.target.files[0]);preview.width=80;preview.height=80;}else preview.textContent=event.target.files[0].name;
+        const progress=document.createElement('div');progress.setAttribute('role','progressbar');progress.textContent='Загрузка';document.querySelector('#uploads').replaceChildren(preview,progress);
+        clock(()=>{progress.remove();send.disabled=false;window.fileReadyAt=performance.now();},250);
+      };
+      window.sendCount=0;send.onclick=()=>{
+        window.submittedAt=performance.now();window.sendCount++;
+        window.clickedBeforeReady=!window.fileReadyAt;window.submittedFiles=[...document.querySelector('#upload').files];
+        const user=document.createElement('div');user.dataset.testid='user-message';user.textContent=document.querySelector('[contenteditable]').innerText;
+        const answer=document.createElement('div');answer.dataset.testid='assistant-message';answer.dataset.isStreaming='false';answer.textContent='Готово';document.querySelector('#transcript').append(user,answer);document.querySelector('[contenteditable]').innerText='';
+      };
+      // Reproduce a browser delaying timers in a background page by ten seconds.
+      window.setTimeout=(fn,ms,...args)=>clock(fn,Math.max(10000,ms),...args);
+    });
+    const result=run({kind:'chat',text:'Изучи',files:[file]});result.catch(()=>{});
+    await page.waitForFunction(()=>window.submittedAt>0,{},{timeout:1800});
+    const timing=await page.evaluate(()=>({ready:window.fileReadyAt,sent:window.submittedAt,count:window.sendCount,early:window.clickedBeforeReady}));
+    t.diagnostic(file.type+': '+Math.round(timing.sent-timing.ready)+' ms from upload readiness to send');assert.equal(timing.count,1);assert.equal(timing.early,false);assert.ok(timing.sent-timing.ready<1000,'ready attachment must not wait for a throttled page timer');
+    const response=await result;assert.equal(response.done,true,response.error);assert.equal(await page.evaluate(()=>window.submittedFiles[0].name),file.name);
+  }
+});
+
+test('a disconnected worker clock stops before submission and never falls back to delayed page timers',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{const original=chrome.runtime.sendMessage;chrome.runtime.sendMessage=message=>message.type==='wait'?Promise.resolve({ok:false}):original(message);window.sendCount=0;document.querySelector('#send').onclick=()=>window.sendCount++;});
+  const result=await run({kind:'chat',text:'Не отправлять',files:[{name:'photo.png',type:'image/png',data:tinyPNG}]});
+  assert.match(result.error,/Связь с расширением/);assert.equal(result.notSent,true);assert.equal(await page.evaluate(()=>window.sendCount),0);assert.equal(await page.locator('[data-testid="user-message"]').count(),0);
+});
+
+test('a PDF document card opens its preview and transfers the actual PDF bytes with the original filename',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);const pdf=Buffer.from('%PDF-1.7\nactual burger document\n%%EOF');
+  await page.route('https://claude.ai/files/burger-document',route=>route.fulfill({contentType:'application/pdf',headers:{'Content-Disposition':'attachment; filename="burger.pdf"'},body:pdf}));
+  await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message"><p>Готово — burger.pdf.</p><div role="button" tabindex="0" data-testid="generated-file" aria-controls="pdf-preview"><span>Burger</span><span>Документ·PDF</span></div></div>';
+    document.querySelector('[data-testid="generated-file"]').onclick=()=>{const panel=document.createElement('div');panel.id='pdf-preview';panel.dataset.testid='document-preview';panel.innerHTML='<iframe src="/files/burger-document#page=1"></iframe><a href="/files/burger-document" download="burger.pdf">Скачать</a>';document.body.append(panel);};
+  });
+  const reply=await run({kind:'open'});assert.equal(reply.done,true,reply.error);const message=reply.result.snapshot.messages.at(-1);assert.deepEqual(reply.result.warnings,[]);assert.equal(message.text,'Готово — burger.pdf.');assert.equal(message.files.length,1);assert.equal(message.files[0].name,'burger.pdf');assert.equal(message.files[0].type,'application/pdf');assert.deepEqual(Buffer.from(message.files[0].data,'base64'),pdf);
+});
+test('a reused PDF viewer waits for the new blob instead of copying a previous document',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Новый PDF<div role="button" data-testid="file-card" data-filename="new.pdf" aria-controls="pdf-preview">New.pdf Документ·PDF</div></div>';
+    const panel=document.createElement('div');panel.id='pdf-preview';panel.dataset.testid='file-preview';const frame=document.createElement('iframe');frame.src=URL.createObjectURL(new Blob(['%PDF-1.7 old-private-document'],{type:'application/pdf'}));panel.append(frame);document.body.append(panel);
+    document.querySelector('[data-testid="file-card"]').onclick=()=>setTimeout(()=>frame.src=URL.createObjectURL(new Blob(['%PDF-1.7 new-document'],{type:'application/pdf'})),200);
+  });
+  const reply=await run({kind:'open'});assert.equal(reply.done,true,reply.error);assert.deepEqual(reply.result.warnings,[]);const files=reply.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'new.pdf');assert.equal(Buffer.from(files[0].data,'base64').toString(),'%PDF-1.7 new-document');
+});
+test('a PDF card never saves an HTML viewer page as a downloadable PDF',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Ответ<div role="button" data-testid="file-card" data-download-url="/viewer/burger.pdf">Burger Документ·PDF</div></div>';});
+  const reply=await run({kind:'open'});assert.equal(reply.done,true,reply.error);assert.equal(reply.result.snapshot.messages.at(-1).files.length,0);assert.match(reply.result.warnings.join(' '),/вместо PDF/);
+});
+
+test('the website renders a generated PDF as a downloadable file and preserves its bytes',{skip:!executable},async t=>{
+  const {createApp}=await import('../server.mjs'),{scryptSync}=await import('node:crypto');const pdf=Buffer.from('%PDF-1.7\nburger document\n%%EOF');
+  const bridge={status:{connected:true},execute:async()=>({catalog:mockCatalog({models:['Sonnet 5.5'],efforts:['medium'],current:{model:'Sonnet 5.5',effort:'medium'}}),chats:[]}),send:async job=>{job.onUpdate({text:'Готово — burger.pdf.',url:'https://claude.ai/chat/pdf-test'});await job.onFile({name:'burger.pdf',type:'application/pdf',data:pdf.toString('base64')});return{};}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext({viewport:{width:390,height:844},acceptDownloads:true});t.after(()=>context.close());const page=await context.newPage();await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('pw');await page.locator('#login-form button').click();await page.waitForFunction(()=>document.querySelector('#model-label').textContent==='Sonnet 5.5'&&!document.querySelector('#attach').disabled);
+  await page.locator('#prompt').fill('Создай PDF');await page.locator('#send').click();const card=page.locator('article.assistant .file-card');await card.locator('strong').filter({hasText:'burger.pdf'}).waitFor();assert.equal(await card.locator('a').textContent(),'Скачать');assert.equal(await card.locator('button').count(),0);
+  const downloading=page.waitForEvent('download');await card.locator('a').click();const download=await downloading;assert.equal(download.suggestedFilename(),'burger.pdf');assert.deepEqual(await readFile(await download.path()),pdf);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('a follow-up button mentioning a PDF is never clicked as a document card',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message">Готово — burger.pdf.<button id="followup">Переделать burger.pdf?</button></div>';window.followupClicks=0;document.querySelector('#followup').onclick=()=>window.followupClicks++;});
+  const result=await run({kind:'open'});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.followupClicks),0);assert.deepEqual(result.result.warnings,[]);
 });
