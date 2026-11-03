@@ -79,7 +79,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         const [name, type] = assets[req.url];res.setHeader('Content-Type',type);res.end(await readFile(new URL('./public/'+name,import.meta.url)));return;
       }
       if(req.method==='GET'){
-        if(req.url==='/api/session')return json(200,{authenticated:!!authorized});
+        if(req.url==='/api/session')return json(200,{authenticated:!!authorized,loginMode:auth.kind==='pin'?'pin':'password'});
         if(!authorized)return json(401,{error:'Войдите в систему'});
         if(req.url==='/api/bridge')return json(200,{...(bridge.status||{mode:'browser',connected:true}),historyRevision:store.deletionRevision,busy:active.size>0,activeChats:[...active.entries()].map(([id,kind])=>({id,kind}))});
         if(req.url==='/api/chats')return json(200,{chats:await store.list(),historyRevision:store.deletionRevision});

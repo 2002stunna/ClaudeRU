@@ -260,4 +260,4 @@ async function refreshState(){
   try{const data=await api('/api/chats/state',{id});if(data.state){const chat=chats.find(c=>c.id===id);if(chat&&chat.settings===settingsBefore&&!operation){const changed=JSON.stringify(chat.claudeState)!==JSON.stringify(data.state);chat.settings={model:data.state.model||'',effort:data.state.effort||''};chat.claudeState=data.state;if(selected===id&&changed)renderOptions();}}}catch{}finally{stateRequestInFlight=false;}
 }
 setInterval(bridgeStatus,1000);
-fetch('/api/session').then(r=>r.json()).then(s=>{if(s.authenticated)showApp();}).catch(()=>{$('login-error').textContent='Нет связи с домашним Mac';});
+fetch('/api/session').then(r=>r.json()).then(s=>{if(s.loginMode==='pin'){document.querySelector('label[for="password"]').textContent='PIN-код вашего сайта';$('password').inputMode='numeric';$('password').maxLength=4;$('password').pattern='[0-9]{4}';}if(s.authenticated)showApp();}).catch(()=>{$('login-error').textContent='Нет связи с домашним Mac';});
