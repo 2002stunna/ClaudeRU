@@ -8,7 +8,8 @@
   const all=(selector,root=document)=>[...root.querySelectorAll(selector)];
   const label=node=>{const text=(node?.innerText||node?.textContent||'').replace(/[\uE000-\uF8FF]/g,'').trim();return text||node?.getAttribute('aria-label')||'';};
   const visible=node=>!!node && node.getClientRects().length>0 && getComputedStyle(node).visibility!=='hidden';
-  const editor=()=>all('[data-testid="chat-input"][contenteditable="true"],[contenteditable="true"][role="textbox"], div.ProseMirror[contenteditable="true"]').find(visible);
+  const activeControl=node=>visible(node)&&!node.closest('[inert],[aria-hidden="true"]');
+  const editor=()=>all('[data-testid="chat-input"][contenteditable="true"],[contenteditable="true"][role="textbox"], div.ProseMirror[contenteditable="true"]').find(activeControl);
   const responses=()=>{const nodes=all('[data-testid="assistant-message"],.font-claude-response');return nodes.filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="assistant-message"],.font-claude-response'));};
   function messageText(node){
     const cards=new Set(pdfCards(node).map(c=>c.container));
@@ -20,7 +21,7 @@
   const effortNames=[['xhigh',/сверхвысок|extra[ -]?high/i],['max',/максимал|maximum|\bmax\b/i],['medium',/средни|medium/i],['low',/низки|\blow\b/i],['high',/высоки|\bhigh\b/i]];
   const effortValue=text=>effortNames.find(([,pattern])=>pattern.test(text))?.[0]||'';
   const choices=()=>all('[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[data-radix-collection-item],button').filter(visible);
-  const modelButton=()=>all('[data-testid="model-selector-dropdown"]').find(visible)||all('button,[role="button"]').filter(visible).find(b=>!b.closest('[role="menu"],[role="listbox"]') && modelName(label(b)));
+  const modelButton=()=>all('[data-testid="model-selector-dropdown"]').find(activeControl)||all('button,[role="button"]').filter(activeControl).find(b=>!b.closest('[role="menu"],[role="listbox"]') && modelName(label(b)));
   const waitFor=async(fn,timeout=12000)=>{const end=Date.now()+timeout;do{const found=fn();if(found)return found;await delay(50);}while(Date.now()<end);throw Error('Элемент интерфейса Claude не появился. Проверьте вкладку на Mac.');};
   async function closeMenus(){for(let i=0;i<2;i++){(document.activeElement||document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));await delay(25);}}
   async function openModels(){await closeMenus();const button=modelButton();if(!button)throw Error('Не найдено меню модели в Claude. Обновите вкладку на Mac.');button.click();await waitFor(()=>choices().some(n=>n!==button&&n.closest('[role="menu"],[role="listbox"]')),5000);return button;}
@@ -164,7 +165,7 @@
     const box=editor();if(!box)return null;
     const fieldset=box.closest('fieldset,form,[data-testid="composer"],[data-testid="chat-composer"]');if(fieldset)return fieldset;
     let root=box.parentElement;
-    while(root&&root!==document.body){if(root.querySelector('input[type="file"]')&&root.querySelector('[data-testid="chat-input-send"],button[aria-label*="отправ" i],button[aria-label*="send" i]'))return root;root=root.parentElement;}
+    while(root&&root!==document.body){if(all('button,[role="button"],input[type="submit"]',root).some(isSendButton))return root;root=root.parentElement;}
     return box.parentElement;
   }
   const outsideTranscript=node=>!node.closest('[data-testid="user-message"],[data-testid="assistant-message"],[data-message-author-role],.font-claude-response');
@@ -209,8 +210,19 @@
     input.focus();if(!document.execCommand('insertText',false,text))throw Error('Не удалось вставить текст в поле Claude.');
     input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:text}));return true;
   }
-  const findSend=()=>all('[data-testid="chat-input-send"]').find(visible)||all('button').find(b=>visible(b)&&/^(send message|send|отправить сообщение|отправить)$/i.test(label(b)));
-  const sendEnabled=button=>!!button&&button.isConnected&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'&&button.getAttribute('aria-busy')!=='true';
+  function isSendButton(node){
+    if(/^(chat-input-send|send-button|send-message-button)$/.test(node.getAttribute('data-testid')||''))return true;
+    const pattern=/^(?:send(?: message)?|отправить(?: сообщение)?)(?:\s*\([^)]*\)|\s+(?:Enter|Ввод))?$/i;
+    return [node.getAttribute('aria-label'),node.getAttribute('title'),label(node)].some(value=>value&&pattern.test(value.trim()));
+  }
+  function findSend(){
+    const scope=composerRoot();if(!scope)return null;
+    let candidates=all('button,[role="button"],input[type="submit"]',scope).filter(n=>activeControl(n)&&isSendButton(n));
+    if(!candidates.length){const form=editor()?.closest('form');if(form){const submit=all('button[type="submit"],input[type="submit"]',form).filter(activeControl);if(submit.length===1)candidates=submit;}}
+    return candidates.find(sendEnabled)||candidates[0]||null;
+  }
+  const sendEnabled=button=>!!button&&button.isConnected&&!button.disabled&&!button.matches(':disabled')&&button.getAttribute('aria-disabled')!=='true'&&button.getAttribute('aria-busy')!=='true';
+  function hasComposerAttachments(root){return !!root&&(uploadInput()?.files?.length>0||imagePreviews(root).length>0||all('[data-testid="attachment"],[data-testid*="file-preview"],[data-testid*="file-thumbnail"]',root).some(n=>visible(n)&&outsideTranscript(n)));}
   function userMessages(){return all('[data-testid="user-message"],[data-message-author-role="user"]').filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="user-message"],[data-message-author-role="user"]'));}
   const turnKey=node=>node.getAttribute('data-message-id')||node.getAttribute('data-turn-key')||node.id||node;
   function base64(bytes){let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(text);}
@@ -327,7 +339,7 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:10});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:11});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;activeJobId=message.id;
@@ -348,29 +360,30 @@
         }
         if(message.kind!=='chat')throw Error('Неизвестная команда расширения. Обновите ClaudeRU и вкладку Claude.');
         let input=await waitFor(editor);
-        if(input.innerText.trim())throw Error('Во вкладке есть неотправленный черновик. Отправьте или удалите его вручную.');
+        if(input.innerText.trim()&&(normalized(input.innerText)!==normalized(message.text)||(message.files?.length||0)>0||hasComposerAttachments(composerRoot())))throw Error('Во вкладке есть другой неотправленный черновик или вложения. Отправьте или удалите их вручную.');
         await applySettings(message.settings);
         requireAvailable();if(readState().streaming)throw Error('В этом чате Claude ещё отвечает. Дождитесь завершения ответа.');
         const upload=await attachFiles(message.files);
         const text=message.text||'Посмотри прикреплённые файлы.';
-        let textInsertions=0,readySince=0;
+        let textInsertions=0,readySince=0,lastReadiness=null;
         const prepareUntil=Date.now()+(upload?45000:20000);
         let send=null;
         while(Date.now()<prepareUntil){
           const root=composerRoot(),box=editor();if(!root||!box){await delay(100);continue;}
-          requireAvailable();const problem=uploadProblem(root);if(problem)throw Error('Claude не принял файл: '+problem);
+          requireAvailable();const problem=upload?uploadProblem(root):'';if(problem)throw Error('Claude не принял файл: '+problem);
           if(!normalized(box.innerText)){
             if(textInsertions>=3)throw Error('Claude несколько раз сбросил текст после загрузки файла. Черновик оставлен во вкладке; сообщение не отправлено.');
             if(insertOwnedText(text))textInsertions++;
           }else if(normalized(box.innerText)!==normalized(text))throw Error('Текст во вкладке Claude изменился. Черновик сохранён, отправка остановлена.');
           const button=findSend();
-          if(uploadsAccepted(upload,root)&&!uploading(root)&&sendEnabled(button)&&normalized(editor()?.innerText)===normalized(text)){
+          lastReadiness={buttonFound:!!button,buttonEnabled:sendEnabled(button),attachmentsReady:uploadsAccepted(upload,root),uploading:!!upload&&uploading(root),textMatches:normalized(editor()?.innerText)===normalized(text)};
+          if(lastReadiness.attachmentsReady&&!lastReadiness.uploading&&lastReadiness.buttonEnabled&&lastReadiness.textMatches){
             if(!readySince)readySince=Date.now();
             if(Date.now()-readySince>=400){send=button;break;}
           }else readySince=0;
           await delay(100);
         }
-        if(!send)throw Error(upload?'Claude ещё обрабатывает файл или не разрешил отправку. Текст и вложения оставлены в черновике; сообщение не отправлено.':'Кнопка отправки не стала доступной. Текст оставлен в черновике Claude.');
+        if(!send){const reason=!lastReadiness?'Поле сообщения Claude ещё не готово.':!lastReadiness.buttonFound?'Не найдена кнопка отправки в активном поле Claude.':!lastReadiness.buttonEnabled?'Claude пока не разрешил отправку этого сообщения.':!lastReadiness.attachmentsReady||lastReadiness.uploading?'Claude ещё обрабатывает вложения.':'Поле сообщения Claude продолжает обновляться.';throw Error(reason+' Черновик сохранён; сообщение не отправлено.');}
         const before=responses().length,beforeUsers=new Set(userMessages().map(turnKey)),beforeAnswers=new Set(responses().map(turnKey));
         // One click only. A failed acknowledgement must never trigger a blind resend.
         if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');

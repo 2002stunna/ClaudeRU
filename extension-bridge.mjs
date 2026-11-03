@@ -26,15 +26,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='10'||req.headers['x-clauderu-page-protocol']!=='10'){
+        if(req.headers['x-clauderu-protocol']!=='11'||req.headers['x-clauderu-page-protocol']!=='11'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='10'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.5.4 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='11'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.5.5 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:10});
+          return json(426,{error:this.compatibilityError,requiredProtocol:11});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:10});
+        if(req.url==='/health')return json(200,{ok:true,protocol:11});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;

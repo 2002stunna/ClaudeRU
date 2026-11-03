@@ -416,3 +416,25 @@ test('a native deletion failure is never interpreted as a successful deletion',{
   const {page,run}=await fixture(t);await installChatActions(page);await page.evaluate(()=>{document.querySelector('aside button').addEventListener('click',()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(n=>n.textContent==='Удалить');item.onclick=()=>{document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=true);const notice=document.createElement('div');notice.setAttribute('role','alert');notice.textContent='Чат не удалён';document.body.append(notice);};});});
   const result=await run({kind:'manage',action:'delete',url:'https://claude.ai/chat/current-123'});assert.match(result.error,/не удалён/);assert.equal(result.result?.applied,undefined);assert.equal(await page.locator('aside a[href="/chat/current-123"]').count(),1);
 });
+
+test('a text-only message is not blocked by unrelated busy indicators in the composer',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{const busy=document.createElement('div');busy.setAttribute('aria-busy','true');busy.innerHTML='<span class="animate-spin">Микрофон подключается</span>';document.querySelector('main').append(busy);});
+  const response=run({kind:'chat',text:'Привет, сделай PDF'});response.catch(()=>{});await page.waitForFunction(()=>window.submittedAt>0,{},{timeout:1600});const result=await response;assert.equal(result.done,true,result.error);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Привет, сделай PDF');
+});
+test('the active composer send button is found by its accessible label even with an arrow glyph',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{const field=document.createElement('fieldset'),main=document.querySelector('main');for(const selector of ['[contenteditable]','#upload','#uploads','#send'])field.append(document.querySelector(selector));main.prepend(field);const stale=document.createElement('button');stale.dataset.testid='chat-input-send';stale.disabled=true;stale.textContent='Старый';main.prepend(stale);const send=document.querySelector('#send');send.removeAttribute('data-testid');send.textContent='↑';});
+  const response=run({kind:'chat',text:'Новый вопрос'});response.catch(()=>{});await page.waitForFunction(()=>window.submittedAt>0,{},{timeout:1600});const result=await response;assert.equal(result.done,true,result.error);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Новый вопрос');
+});
+test('an identical text draft left by a failed attempt can be sent once without inserting it again',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.locator('[contenteditable]').fill('Мой запрос');await page.evaluate(()=>{window.sendCount=0;const send=document.querySelector('#send'),original=send.onclick;send.onclick=()=>{window.sendCount++;original();};});
+  const result=await run({kind:'chat',text:'Мой запрос'});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sendCount),1);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Мой запрос');
+});
+
+test('a matching text draft with an existing native attachment is preserved without sending it',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.locator('[contenteditable]').fill('Мой запрос');await page.evaluate(()=>{const img=document.createElement('img');img.src=URL.createObjectURL(new Blob(['image'],{type:'image/png'}));img.width=80;img.height=80;document.querySelector('#uploads').append(img);window.clicks=0;document.querySelector('#send').onclick=()=>window.clicks++;});
+  const result=await run({kind:'chat',text:'Мой запрос'});assert.equal(result.notSent,true);assert.match(result.error,/черновик|вложения/);assert.equal(await page.evaluate(()=>window.clicks),0);assert.equal(await page.locator('[contenteditable]').innerText(),'Мой запрос');assert.equal(await page.locator('#uploads img').count(),1);
+});
+test('a disabled composer cannot submit until the native fieldset permits sending',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{const field=document.createElement('fieldset');for(const selector of ['[contenteditable]','#upload','#uploads','#send'])field.append(document.querySelector(selector));document.querySelector('main').prepend(field);field.disabled=true;const send=document.querySelector('#send'),original=send.onclick;send.onclick=()=>{window.sentBeforeEnabled=!window.enabledAt;original();};setTimeout(()=>{field.disabled=false;window.enabledAt=performance.now();},650);});
+  const result=await run({kind:'chat',text:'Подожди готовности'});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sentBeforeEnabled),false);assert.ok(await page.evaluate(()=>window.submittedAt>=window.enabledAt));
+});
