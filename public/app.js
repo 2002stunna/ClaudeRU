@@ -3,13 +3,14 @@ const $=id=>document.getElementById(id);
 let chats=[],selected=null,operation=false,initializing=false,sending=new Set(),catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
 let statusRequestInFlight=false,stateRequestInFlight=false,contextChat=null,renameTarget=null,archiveView=false,pendingSelection=null;const remoteBusy=new Set();
 let historyRequestInFlight=false,historyRevision=-1;
+let currentRequestInFlight=false,viewEpoch=0,nativeLoading=false,pendingNativeOpen=null;
 const busyHere=()=>sending.has(selected)||remoteBusy.has(selected);
 const messageNodes=new WeakMap();
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
 const current=()=>chats.find(c=>c.id===selected);
 const draft=()=>{if(!drafts.has(selected))drafts.set(selected,{text:current()?.draft?.text||'',files:[...(current()?.draft?.files||[])]});return drafts.get(selected);};
 const status=text=>{$('status').textContent=text;$('status').hidden=!text;};
-const svg=name=>{const node=document.createElementNS('http://www.w3.org/2000/svg','svg');node.classList.add('icon');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-'+name);node.append(use);return node;};
+const svg=name=>{const node=document.createElementNS('http://www.w3.org/2000/svg','svg');node.classList.add('icon');node.setAttribute('aria-hidden','true');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-'+name);node.append(use);return node;};
 async function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
 async function api(path,body){const r=body===undefined?await fetch(path):await post(path,body);const data=await r.json();if(!r.ok){if(r.status===401){$('app').hidden=true;$('login').hidden=false;}throw Error(data.error||'Ошибка соединения');}return data;}
 function upsert(chat){if(chat.deleted){chats=chats.filter(c=>c.id!==chat.id);return chat;}const i=chats.findIndex(c=>c.id===chat.id);if(i<0)chats.unshift(chat);else chats[i]=chat;return chat;}
@@ -39,10 +40,10 @@ function renderSidebar(){
   const visible=chats.filter(c=>!!c.archived===archiveView&&(!search||c.title.toLowerCase().includes(search)));
   visible.sort(sortMode==='az'?(a,b)=>a.title.localeCompare(b.title,'ru'):(a,b)=>b.updatedAt-a.updatedAt);
   for(const chat of visible){
-    const button=document.createElement('button');const row=document.createElement('div');row.className='chat-row'+(chat.id===selected?' selected':'')+(chat.unread?' unread':'');button.className=chat.id===selected?'selected':'';button.title=chat.title;button.setAttribute('aria-current',String(chat.id===selected));
-    const name=document.createElement('span');name.className='chat-name';name.textContent=chat.title+(sending.has(chat.id)?' ···':'');button.append(name);
+    const button=document.createElement('button');const row=document.createElement('div');row.className='chat-row'+(chat.id===selected?' selected':'')+(chat.unread?' unread':'');button.className=chat.id===selected?'selected':'';button.title=chat.title?.trim()||'Без названия';button.setAttribute('aria-current',String(chat.id===selected));
+    const name=document.createElement('span');name.className='chat-name';name.textContent=(chat.title?.trim()||'Без названия')+(sending.has(chat.id)?' ···':'');button.append(name);
     if(chat.messages.some(m=>m.files?.length)){const mark=svg('files');mark.classList.add('chat-file-mark');button.append(mark);}
-    button.onclick=()=>selectChat(chat.id);const more=document.createElement('button');more.type='button';more.className='chat-more';more.textContent='…';more.setAttribute('aria-label','Действия: '+chat.title);more.setAttribute('aria-haspopup','menu');more.onclick=e=>{e.stopPropagation();openChatContext(chat,more);};row.append(button,more);let target=chat.pinned?$('pinned-chats'):$('chats');if(chat.group&&!chat.pinned){if(!groups.has(chat.group)){const section=document.createElement('details');section.open=true;const heading=document.createElement('summary');heading.textContent=chat.group;heading.className='section-label';const nav=document.createElement('nav');nav.setAttribute('aria-label',chat.group);section.append(heading,nav);$('grouped-chats').append(section);groups.set(chat.group,nav);}target=groups.get(chat.group);}target.append(row);
+    button.onclick=()=>selectChat(chat.id);const more=document.createElement('button');more.type='button';more.className='chat-more';more.textContent='…';more.setAttribute('aria-label','Действия: '+(chat.title?.trim()||'Без названия'));more.setAttribute('aria-haspopup','menu');more.onclick=e=>{e.stopPropagation();openChatContext(chat,more);};row.append(button,more);let target=chat.pinned?$('pinned-chats'):$('chats');if(chat.group&&!chat.pinned){if(!groups.has(chat.group)){const section=document.createElement('details');section.open=true;const heading=document.createElement('summary');heading.textContent=chat.group;heading.className='section-label';const nav=document.createElement('nav');nav.setAttribute('aria-label',chat.group);section.append(heading,nav);$('grouped-chats').append(section);groups.set(chat.group,nav);}target=groups.get(chat.group);}target.append(row);
   }
   $('sidebar-empty').hidden=visible.length>0;
 }
@@ -82,31 +83,32 @@ function renderOptions(){
   updateControls();
 }
 function renderAttachments(){$('attachments').replaceChildren(...(draft().files||[]).map(f=>fileCard(f,true)));updateControls();}
-function updateControls(){const blocked=initializing||operation||busyHere()||current()?.claudeState?.streaming===true;
+function updateControls(){const blocked=initializing||nativeLoading||operation||busyHere()||current()?.claudeState?.streaming===true;
   const contextBlocked=initializing||operation||sending.has(contextChat)||remoteBusy.has(contextChat)||!chats.some(c=>c.id===contextChat);
   for(const button of $('chat-context').querySelectorAll('button'))button.disabled=contextBlocked;
   for(const id of ['model-toggle','sync','refresh-models','refresh-chat','attach','other-models-trigger','effort-menu-trigger','chat-title-button'])$(id).disabled=blocked;
   for(const button of document.querySelectorAll('#model-submenu button,#effort-options button'))button.disabled=blocked||button.dataset.available==='false';
   $('selected-model').disabled=blocked||$('current-model-name').textContent==='Подключите Claude';
   $('claude-notice').textContent=current()?.claudeState?.blocked||'';$('claude-notice').hidden=!$('claude-notice').textContent;
-  $('send').disabled=blocked||!!current()?.claudeState?.blocked||!($('prompt').value.trim()||draft().files.length);$('new-chat').disabled=initializing||operation;$('prompt').disabled=initializing;
+  $('send').disabled=blocked||!!current()?.claudeState?.blocked||!($('prompt').value.trim()||draft().files.length);$('new-chat').disabled=initializing||operation;$('prompt').disabled=initializing||nativeLoading;
   $('catalog-loading').hidden=!operation||!!catalog;
 }
 function render(){renderSidebar();renderMessages();renderOptions();$('chat-title').textContent=current()?.title||'Новая сессия';$('pin-chat').textContent=current()?.pinned?'Открепить':'Закрепить';$('prompt').value=draft().text;renderAttachments();updateControls();}
 async function newChat(){try{const {chat}=await api('/api/chats/new',{settings:{}});upsert(chat);await selectChat(chat.id);}catch(e){status(e.message);}}
 async function selectChat(id){
+  viewEpoch++;pendingNativeOpen=null;
   selected=id;localStorage.setItem('clauderu-selected',id);$('sidebar').classList.remove('open');$('sidebar-backdrop').hidden=true;$('toggle-sidebar').setAttribute('aria-expanded','false');closePopovers();status('');render();$('messages').scrollTop=$('messages').scrollHeight;
   if(!busyHere()){if(operation)pendingSelection=id;else await refreshSelected(id);}
 }
 function finishOperation(){operation=false;updateControls();const id=pendingSelection;pendingSelection=null;if(id&&selected===id&&!busyHere())void refreshSelected(id);}
-async function refreshSelected(id=selected,{collectArtifacts=false}={}){
+async function refreshSelected(id=selected,{collectArtifacts=false,followNative=false}={}){
   if(operation)return;operation=true;updateControls();
-  try{const data=await api('/api/chats/open',{id,collectArtifacts});if(data.removed){chats=chats.filter(c=>c.id!==id);if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);closePopovers();if(selected===id){const next=chats.find(c=>!c.archived);if(next)await selectChat(next.id);else await newChat();}else renderSidebar();return;}upsert(data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}}
-  catch(e){if(selected===id)status(e.message);}finally{finishOperation();}
+  try{const data=await api('/api/chats/open',{id,collectArtifacts,followNative});if(data.removed){chats=chats.filter(c=>c.id!==id);if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);closePopovers();if(selected===id){const next=chats.find(c=>!c.archived);if(next)await selectChat(next.id);else await newChat();}else renderSidebar();return;}upsert(data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}if(pendingNativeOpen===id)pendingNativeOpen=null;}
+  catch(e){if(followNative)pendingNativeOpen=id;else if(selected===id)status(e.message);}finally{finishOperation();}
 }
 async function sync({quiet=false,refreshCatalog=false}={}){
   if(operation||busyHere())return;operation=true;lastSyncAttempt=Date.now();updateControls();status('');
-  try{let prepared=false;const data=await api('/api/sync',{refreshCatalog});chats=data.chats.map(c=>sending.has(c.id)?chats.find(local=>local.id===c.id)||c:c);catalog=data.catalog;catalogError=catalog?.warning||'';if(!current())selected=chats[0]?.id||null;if(!selected){operation=false;await newChat();operation=true;prepared=true;}render();if(catalogError)status(catalogError);else if(!quiet)status('');operation=false;if(!prepared&&!busyHere())await refreshSelected();operation=true;}
+  try{let prepared=false;const data=await api('/api/sync',{refreshCatalog});chats=data.chats.map(c=>sending.has(c.id)?chats.find(local=>local.id===c.id)||c:c);catalog=data.catalog;catalogError=catalog?.warning||'';if(!current())selected=chats[0]?.id||null;if(!selected){operation=false;await newChat();operation=true;prepared=true;}render();if(catalogError)status(catalogError);else if(!quiet)status('');operation=false;if(!await refreshCurrent({initial:initializing})&&!prepared&&!busyHere())await refreshSelected();operation=true;}
   catch(e){catalogError=e.message;renderOptions();status(e.message);}finally{finishOperation();renderOptions();}
 }
 async function showApp(){
@@ -119,6 +121,7 @@ async function showApp(){
       localStorage.setItem('clauderu-migrated','1');
     }
     selected=localStorage.getItem('clauderu-selected');if(!current())selected=chats[0]?.id||null;
+    if(await refreshCurrent({initial:true})){await bridgeStatus();return;}
     if(!selected){const bridge=await api('/api/bridge');if(bridge.connected)await sync({quiet:true});if(!selected)await newChat();}else{render();await refreshSelected();}
     await bridgeStatus();
   }catch(e){status(e.message);}finally{initializing=false;updateControls();}
@@ -197,16 +200,18 @@ async function performChatAction(id,action,fields={}){
     const data=await api('/api/chats/action',{id,action,...fields});
     if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);
     if(data.groups){$('group-list').replaceChildren();for(const group of data.groups){const button=document.createElement('button');button.textContent=group;button.onclick=()=>{$('group-dialog').close();void performChatAction(id,'move',{group});};$('group-list').append(button);}if(!data.groups.length)$('group-list').textContent='В Claude пока нет доступных групп.';$('group-dialog').showModal();}
-    else{if(action==='delete')chats=chats.filter(c=>c.id!==id);else if(data.chat)upsert(data.chat);$('rename-dialog').close();if(id===selected&&['delete','archive'].includes(action)){selected=chats.find(c=>!c.archived)?.id||null;if(!selected){operation=false;await newChat();operation=true;}}render();status('');}
+    else{if(action==='delete')chats=chats.filter(c=>c.id!==id);else if(data.chat)upsert(data.chat);$('rename-dialog').close();if(id===selected&&['delete','archive'].includes(action)){const next=chats.find(c=>!c.archived);if(next)await selectChat(next.id);else await newChat();}render();status(data.warning||'');}
   }catch(e){status(e.message);}finally{finishOperation();}
 }
 function openChatContext(chat,trigger){
   closePopovers();contextChat=chat.id;const menu=$('chat-context');menu.replaceChildren();
   for(const [action,text] of [['unread','Отметить как непрочитанное'],[chat.pinned?'unpin':'pin',chat.pinned?'Открепить':'Закрепить'],['rename','Переименовать'],['move','Переместить в группу'],['archive','Архивировать'],['delete','Удалить']]){
-    const button=document.createElement('button');button.type='button';button.setAttribute('role','menuitem');button.dataset.action=action;button.textContent=text;button.disabled=operation||sending.has(chat.id)||remoteBusy.has(chat.id);if(action==='delete')button.className='danger';button.onclick=()=>{if(action==='rename')requestRename(chat);else if(action==='delete'){closePopovers();$('delete-title').textContent='Удалить «'+chat.title+'» из Claude?';$('delete-dialog').showModal();}else void performChatAction(chat.id,action);};menu.append(button);
+    const button=document.createElement('button');button.type='button';button.setAttribute('role','menuitem');button.dataset.action=action;const icon={unread:'mail',pin:'pin',unpin:'unpin',rename:'edit',move:'folder',archive:'archive',delete:'trash'}[action];const label=document.createElement('span');label.className='menu-label';label.textContent=text;button.append(svg(icon),label);if(action==='move'){const arrow=svg('right');arrow.classList.add('menu-chevron');button.append(arrow);}if(action==='delete'){const divider=document.createElement('div');divider.className='menu-separator';divider.setAttribute('role','separator');menu.append(divider);}button.disabled=operation||sending.has(chat.id)||remoteBusy.has(chat.id);if(action==='delete')button.className='danger';button.onclick=()=>{if(action==='rename')requestRename(chat);else if(action==='delete')requestDelete(chat);else void performChatAction(chat.id,action);};menu.append(button);
   }
-  updateControls();const rect=trigger.getBoundingClientRect();menu.hidden=false;menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-300))+'px';menu.style.top=Math.max(8,Math.min(rect.bottom,innerHeight-menu.offsetHeight-8))+'px';menu.querySelector('button:not(:disabled)')?.focus();
+  updateControls();const rect=trigger.getBoundingClientRect();menu.hidden=false;menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-menu.offsetWidth-8))+'px';menu.style.top=Math.max(8,Math.min(rect.bottom,innerHeight-menu.offsetHeight-8))+'px';menu.querySelector('button:not(:disabled)')?.focus();
 }
+function requestDelete(chat){contextChat=chat.id;closePopovers();$('delete-title').textContent='Удалить «'+(chat.title||'Без названия')+'»?';$('delete-note').textContent=chat.url?'Разговор будет удалён в Claude и в обёртке. Можно также удалить только запись в обёртке.':'Этот разговор сохранён только в обёртке.';$('delete-local').hidden=!chat.url;$('confirm-delete').textContent=chat.url?'Удалить везде':'Удалить';$('delete-dialog').showModal();}
+$('delete-local').onclick=()=>{$('delete-dialog').close();void performChatAction(contextChat,'delete',{localOnly:true});};
 $('confirm-delete').onclick=()=>{$('delete-dialog').close();void performChatAction(contextChat,'delete');};$('cancel-delete').onclick=()=>$('delete-dialog').close();$('close-groups').onclick=()=>$('group-dialog').close();
 $('show-archive').onclick=()=>{archiveView=!archiveView;$('show-archive').classList.toggle('active',archiveView);renderSidebar();};
 function openFiles(onlyCurrent=false){closePopovers();$('files-title').textContent=onlyCurrent?'Файлы разговора':'Артефакты';$('files-description').textContent=onlyCurrent?'Созданные файлы и вложения этого разговора.':'Файлы, созданные Claude в ваших разговорах.';$('files-list').replaceChildren();let count=0;
@@ -221,7 +226,21 @@ document.addEventListener('keydown',e=>{
   if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){const menu=document.activeElement?.closest('[role="menu"]');if(!menu)return;const buttons=[...menu.querySelectorAll('button:not(:disabled)')].filter(b=>b.getClientRects().length);if(!buttons.length)return;e.preventDefault();const i=buttons.indexOf(document.activeElement);const index=e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;buttons[index].focus();}
   if(e.key==='ArrowLeft'&&!$('model-menu').hidden){closeSubmenus();$('other-models-trigger').focus();}
 });
-async function bridgeStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const r=await fetch('/api/bridge',{signal:AbortSignal.timeout(5000)});if(!r.ok)return;const state=await r.json();remoteBusy.clear();for(const job of state.activeChats||[])if(job.kind==='chat')remoteBusy.add(job.id);updateControls();if(Number.isInteger(state.historyRevision)&&state.historyRevision!==historyRevision&&!operation)void refreshHistory(state.historyRevision);if(state.connected&&!operation&&!busyHere()&&current()?.verifiedAt)void refreshState();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!busyHere()){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&(!catalog||!lastSyncAttempt)&&!operation&&!busyHere()&&Date.now()-lastSyncAttempt>20000)void sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}finally{statusRequestInFlight=false;}}
+async function bridgeStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const r=await fetch('/api/bridge',{signal:AbortSignal.timeout(5000)});if(!r.ok)return;const state=await r.json();remoteBusy.clear();for(const job of state.activeChats||[])if(job.kind==='chat')remoteBusy.add(job.id);updateControls();if(Number.isInteger(state.historyRevision)&&state.historyRevision!==historyRevision&&!operation)void refreshHistory(state.historyRevision);if(state.connected&&!operation&&!initializing)void refreshCurrent();if(state.connected&&!operation&&!busyHere()&&current()?.verifiedAt)void refreshState();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!busyHere()){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&!document.querySelector('dialog[open]')&&(!catalog||!lastSyncAttempt)&&!operation&&!busyHere()&&Date.now()-lastSyncAttempt>20000)void sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}finally{statusRequestInFlight=false;}}
+async function refreshCurrent({initial=false}={}){
+  if(currentRequestInFlight||operation||initializing&&!initial||!initial&&document.querySelector('dialog[open]'))return false;currentRequestInFlight=true;
+  const epoch=viewEpoch;
+  try{
+    const data=await api('/api/current',{id:selected,knownURL:current()?.url,includeSnapshot:initial||pendingNativeOpen===selected});
+    if(operation||epoch!==viewEpoch)return false;if(data.loading){nativeLoading=true;updateControls();return true;}nativeLoading=false;if(!data.supported||!data.chat||data.chat.deleted){updateControls();return false;}
+    const changed=selected!==data.chat.id;const local=chats.find(c=>c.id===data.chat.id);const beforeOptions=JSON.stringify([current()?.settings,current()?.claudeState,catalog]),beforeMessages=JSON.stringify(local?.messages);
+    upsert(sending.has(data.chat.id)&&local?local:data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}
+    if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);
+    if(changed){selected=data.chat.id;pendingNativeOpen=null;viewEpoch++;localStorage.setItem('clauderu-selected',selected);closePopovers();status('');}
+    if(changed||initial)render();else{if(beforeMessages!==JSON.stringify(current()?.messages)&&!sending.has(selected))renderMessages();if(beforeOptions!==JSON.stringify([current()?.settings,current()?.claudeState,catalog]))renderOptions();else updateControls();}if((changed||initial||pendingNativeOpen===selected)&&!busyHere()&&!data.chat.claudeState?.streaming)await refreshSelected(selected,{followNative:true});
+    return true;
+  }catch{return false;}finally{currentRequestInFlight=false;}
+}
 async function refreshHistory(expectedRevision){
   if(historyRequestInFlight||operation||initializing)return;historyRequestInFlight=true;
   try{

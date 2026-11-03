@@ -30,7 +30,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
   function allowedSettings(value){const settings=chatOptions(value);if(settings.model&&!MODEL_NAMES.includes(settings.model))throw Error('Выберите одну из шести моделей в меню ClaudeRU');return settings;}
   async function applySnapshot(chat,snapshot) {
     if(!snapshot||typeof snapshot!=='object')throw Error('Расширение не вернуло содержимое чата');
-    if(snapshot.url)chat.url=conversationURL(snapshot.url);
+    if(Object.hasOwn(snapshot,'url')&&(snapshot.url||null)!==(chat.url||null))throw Error('Вкладка Claude переключилась на другой разговор. Обновите текущий чат.');
     if(typeof snapshot.title==='string'&&snapshot.title.trim())chat.title=snapshot.title.slice(0,160);
     if(Array.isArray(snapshot.messages)) {
       const messages=[];
@@ -51,9 +51,10 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
     chat.settings=chatOptions(state);chat.claudeState={...chat.settings,blocked:typeof state.blocked==='string'?state.blocked.slice(0,1500):'',streaming:state.streaming===true};chat.verifiedAt=Date.now();
   }
   async function chatAction(chat,action,fields={}){
+    if(action==='delete'&&fields.localOnly){await store.deleteChat(chat,'local');return {chat,localOnly:true,historyRevision:store.deletionRevision};}
     if(chat.url){
       if(!bridge.execute)throw Error('Обновите расширение ClaudeRU');
-      const result=await bridge.execute({kind:'manage',chatId:chat.id,url:chat.url,action,...fields});
+      let result;try{result=await bridge.execute({kind:'manage',chatId:chat.id,url:chat.url,action,...fields});}catch(e){if(action==='delete'&&/Не найдено меню именно этого чата|Чат не найден|conversation not found/i.test(e.message)){await store.deleteChat(chat,'local');return {chat,localOnly:true,historyRevision:store.deletionRevision,warning:'Удалено из обёртки. Удаление в Claude не подтверждено.'};}throw e;}
       if(action==='move'&&fields.group===undefined)return result;
       if(result?.applied!==true)throw Error('Claude не подтвердил действие. Изменения не сохранены.');
     }else if(action==='move'&&fields.group===undefined)return {groups:[...new Set((await store.list()).map(c=>c.group).filter(Boolean))]};
@@ -123,10 +124,11 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
       if(req.url==='/api/chats/metadata'||req.url==='/api/chats/action'){
         const key=body.id;if(active.has(key))return json(409,{error:'В этом чате ещё выполняется действие'});active.set(key,'manage');
         try{
-          const chat=await store.get(body.id);
+          let chat;try{chat=await store.get(body.id);}catch(e){const deleted=store.chats.find(c=>c.id===body.id&&c.deleted);if(body.action==='delete'&&deleted)return json(200,{chat:deleted,historyRevision:store.deletionRevision,localOnly:true});throw e;}
           let action=body.action;if(req.url.endsWith('/metadata'))action=body.title!==undefined?'rename':body.pinned?'pin':'unpin';
           if(!['rename','pin','unpin','unread','archive','delete','move'].includes(action))throw Error('Неизвестное действие с чатом');
           const fields={};
+          if(action==='delete')fields.localOnly=body.localOnly===true;
           if(action==='rename'){if(typeof body.title!=='string'||!body.title.trim()||body.title.length>160)throw Error('Введите название до 160 символов');fields.title=body.title.trim();}
           if(action==='move'&&body.group!==undefined){if(typeof body.group!=='string'||!body.group.trim()||body.group.length>160)throw Error('Выберите группу');fields.group=body.group;}
           const result=await chatAction(chat,action,fields);if(req.url.endsWith('/metadata')&&action==='rename'&&typeof body.pinned==='boolean')await chatAction(chat,body.pinned?'pin':'unpin');return json(200,result);
@@ -146,6 +148,20 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         try{const chat=await store.get(body.id),verifiedBefore=chat.verifiedAt;if(active.has(chat.id))return json(409,{error:'В этом чате выполняется действие'});const result=await bridge.execute({kind:'state',chatId:chat.id,url:chat.url});if(chat.verifiedAt===verifiedBefore&&!active.has(chat.id))applyState(chat,result.state);return json(200,{state:chat.claudeState});}
         catch(e){return json(400,{error:e.message});}
       }
+      if(req.url==='/api/current'){
+        try{
+          if(!bridge.execute)return json(200,{supported:false});
+          const selected=(await store.list()).find(c=>c.id===body.id),selectedChatId=selected&&(selected.url||null)===(body.knownURL||null)?selected.id:undefined;
+          const result=await bridge.execute({kind:'current',chatId:'native-current',selectedChatId,knownURL:body.knownURL,includeSnapshot:body.includeSnapshot===true});
+          if(result?.current!==true)return json(200,{supported:false,loading:result?.loading===true});
+          const url=result.url?conversationURL(result.url):null;let chat;
+          if(url){chat=await store.create({url,title:result.snapshot?.title||result.title||'Без названия'});if(chat.deleted&&chat.deletionSource==='local'&&result.snapshot?.messages?.length)await store.restoreLocal(chat);if(chat.deleted)return json(200,{supported:true,hidden:true,url});}
+          else if(result.isNew){const list=await store.list(),matches=c=>!c.url&&(!c.messages.length||active.get(c.id)==='chat');chat=list.find(c=>c.id===result.boundChatId&&matches(c))||list.find(c=>c.id===body.id&&matches(c))||list.find(c=>!c.url&&!c.messages.length)||await store.create({title:'Новая сессия'});}
+          else return json(200,{supported:false});
+          if(!active.has(chat.id)){if(result.snapshot)await applySnapshot(chat,result.snapshot);else if(result.state){const before=JSON.stringify(chat.claudeState);applyState(chat,result.state);if(before!==JSON.stringify(chat.claudeState))await store.save(chat);}}
+          return json(200,{supported:true,chat,url,isNew:result.isNew===true,catalog:catalogFor(store.modelCatalog,result.state||chat.settings),historyRevision:store.deletionRevision});
+        }catch(e){return json(400,{error:e.message});}
+      }
       if(req.url==='/api/sync'||req.url==='/api/chats/open'){
         const key=req.url==='/api/sync'?'sync':body.id;
         if(active.has(key))return json(409,{error:'В этом чате ещё выполняется действие'});
@@ -161,7 +177,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
             return json(200,{chats:await store.list(),catalog:result.catalog});
           }
           const chat=await store.get(body.id);
-          const result=await executeWithCatalog({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true});
+          const result=await executeWithCatalog({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true,followNative:body.followNative===true});
           if(result?.unavailable===true){await store.deleteChat(chat,'missing');return json(200,{removed:true,id:chat.id,historyRevision:store.deletionRevision});}
           if(result?.snapshot)await applySnapshot(chat,result.snapshot);chat.unread=false;
           if(result?.catalog){applyState(chat,result.catalog.current);chat.catalog=result.catalog;await store.save(chat);}
@@ -179,6 +195,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           if(!bridge.execute&&active.size)return json(409,{error:'Уже формируется ответ. Дождитесь его завершения.'});
           await ensureModelCatalog();
           chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
+          if(bridge.execute&&!chat.url&&chat.messages.length)throw Error('У этой локальной копии нет связанного чата Claude. Откройте текущий чат Claude или создайте новую сессию.');
           if(active.has(chat.id))return json(409,{error:'В этом чате уже формируется ответ. Дождитесь его завершения.'});
         }catch(e){return json(400,{error:e.message});}
         const previousTitle=chat.title,previousLoaded=chat.loaded;active.set(chat.id,'chat');chat.settings=settings;delete chat.draft;

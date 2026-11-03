@@ -157,7 +157,7 @@
     const rawTitle=document.title.replace(/\s*[-|—]\s*Claude.*$/i,'').trim();
     const header=document.querySelector('[data-testid="session-title-split"] h2,[data-testid="chat-header"] h2');
     const title=(header&&visible(header)?label(header):'')||(/^claude(?:\.ai)?$/i.test(rawTitle)?'':rawTitle);
-    return {url:chatURL(),title,messages,state:readState()};
+    const url=chatURL();return {url,title:url?title:'Новая сессия',messages:url?messages:[],state:readState()};
   }
   function chatIndex(){
     const index=new Map();
@@ -300,7 +300,7 @@
     const describe=node=>({tag:node.tagName,testId:node.getAttribute('data-testid'),role:node.getAttribute('role'),label:(node.getAttribute('aria-label')||node.getAttribute('title')||node.getAttribute('alt')||'').slice(0,160),parents:[...function*(n){for(let i=0;n&&i<5;i++,n=n.parentElement)yield n.tagName+(n.getAttribute('data-testid')?'[data-testid='+n.getAttribute('data-testid')+']':'')+(n.getAttribute('role')?'[role='+n.getAttribute('role')+']':'');}(node.parentElement)]});
     const root=responses().at(-1),scope=root?assistantFileScope(root):null;
     const imageInfo=img=>({...describe(img),inLastTurn:!!scope?.contains(img),width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,complete:img.complete,source:address(img.currentSrc||img.src)});
-    return {version:15,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
+    return {version:16,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
   }
   const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
   function pdfCards(root){
@@ -392,7 +392,7 @@
   }
   async function collectFiles({openArtifact=false}={}){
     const files=[],warnings=[];let total=0;const seen=new Set(),downloadedPDFs=new Set(),pdfErrors=new Map();
-    const root=responses().at(-1);if(!root)return {files,warnings};const scope=assistantFileScope(root);
+    const root=chatURL()?responses().at(-1):null;if(!root)return {files,warnings};const scope=assistantFileScope(root);
     const artifact=all('[data-testid="artifact-button"],button[aria-label*="artifact" i],button[aria-label*="артефакт" i]',root).find(n=>visible(n)&&(n.dataset.testid==='artifact-button'||/^(open artifact|открыть артефакт|artifact\b|артефакт(?:\s|:|$))/i.test(label(n))));
     let panel=null;
     const codeSelector='pre code,pre:not(:has(code)),[data-testid="artifact-code"]:not(:has(code,pre)),textarea[readonly]';
@@ -454,8 +454,9 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:15});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:16});return;}
     if(message.type!=='run')return;
+    if(message.kind==='current'){const url=chatURL(),isNew=['/','/new'].includes(location.pathname);if(!url&&!isNew){respond({done:true,result:{current:false}});return;}const result={current:true,url,isNew,state:readState()};if(message.includeSnapshot===true||url!==message.knownURL)result.snapshot=snapshot();respond({done:true,result});return;}
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(message.kind==='diagnostics'){respond({done:true,result:fileDiagnostics()});return;}
     if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;activeJobId=message.id;
@@ -465,17 +466,20 @@
         hydrateCache(message.catalogCache);
         if(message.kind==='catalog'){respond({done:true,result:{catalog:await learnCatalog()}});return;}
         if(message.kind==='inspect'||message.kind==='options'){
-          if(message.kind==='options')await applySettings(message.settings);
+          if(message.kind==='options'){if(Object.hasOwn(message,'url')&&(message.url||null)!==chatURL())throw Error('Вкладка Claude переключилась на другой разговор. Настройки не изменялись.');await applySettings(message.settings);}
           const catalog=message.kind==='options'?quickCatalog():await inspectCatalog();respond({done:true,result:{catalog,chats:chatIndex(),snapshot:snapshot()}});return;
         }
         if(message.kind==='manage'){const result=await manageChat(message);respond({done:true,result});return;}
         if(message.kind==='open'){
           await waitFor(()=>conversationUnavailable()||responses().length||all('[data-testid="user-message"]').length||editor());
+          if(Object.hasOwn(message,'url')&&(message.url||null)!==chatURL())throw Error('Вкладка Claude переключилась на другой разговор. История не переносилась.');
           if(conversationUnavailable()){respond({done:true,result:{unavailable:true,url:message.url}});return;}
           const state=snapshot(),generated=await collectFiles({openArtifact:message.collectArtifacts===true});const last=state.messages.findLast(m=>m.role==='assistant');if(last)last.files=generated.files;
           respond({done:true,result:{snapshot:state,catalog:await inspectCatalog(),warnings:generated.warnings}});return;
         }
         if(message.kind!=='chat')throw Error('Неизвестная команда расширения. Обновите ClaudeRU и вкладку Claude.');
+        const requireConversation=()=>{if(Object.hasOwn(message,'url')&&(message.url||null)!==chatURL())throw Error('Вкладка Claude переключилась на другой разговор. Сообщение не отправлено.');};
+        requireConversation();
         let input=await waitFor(editor);
         if(input.innerText.trim()&&(normalized(input.innerText)!==normalized(message.text)||(message.files?.length||0)>0||hasComposerAttachments(composerRoot()))){
           if(!replaceOwnedDraft(input,message.text||'Посмотри прикреплённые файлы.'))throw Error('Во вкладке есть другой неотправленный черновик или вложения. Отправьте или удалите их вручную.');
@@ -488,6 +492,7 @@
         const prepareUntil=Date.now()+(upload?45000:20000);
         let send=null;
         while(Date.now()<prepareUntil){
+          requireConversation();
           const root=composerRoot(),box=editor();if(!root||!box){await delay(100);continue;}
           requireAvailable();const problem=upload?uploadProblem(root):'';if(problem)throw Error('Claude не принял файл: '+problem);
           if(!normalized(box.innerText)){
@@ -508,15 +513,17 @@
         if(!send){const reason=!lastReadiness?'Поле сообщения Claude ещё не готово.':!lastReadiness.buttonFound?'Не найдена кнопка отправки в активном поле Claude.':!lastReadiness.buttonEnabled?'Claude пока не разрешил отправку этого сообщения.':!lastReadiness.attachmentsReady||lastReadiness.uploading?'Claude ещё обрабатывает вложения.':'Поле сообщения Claude продолжает обновляться.';throw Error(reason+' Черновик сохранён; сообщение не отправлено.');}
         const before=responses().length,beforeUsers=new Set(userMessages().map(turnKey)),beforeAnswers=new Set(responses().map(turnKey));
         // One click only. A failed acknowledgement must never trigger a blind resend.
+        requireConversation();
         if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');
         ownedDraft=null;submissionAttempted=true;send.click();
         try{
           await waitFor(()=>{requireAvailable();return userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before;},10000);
         }catch(e){if(e.state){e.notSent=!userMessages().some(n=>!beforeUsers.has(turnKey(n)));throw e;}throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}
-        let previous='',unchangedSince=0,completedSince=0,seenStop=false;
+        let previous='',unchangedSince=0,completedSince=0,seenStop=false,responseURL=chatURL();
         const deadline=Date.now()+165000;
         while(Date.now()<deadline){
           await delay(250);requireAvailable();
+          const actualURL=chatURL();if(responseURL&&actualURL!==responseURL)throw Error('Вкладка Claude переключилась во время ответа. Ответ другого разговора не переносился.');if(!responseURL&&actualURL)responseURL=actualURL;
           const list=responses(),text=list.length>before?messageText(list.at(-1)):'';
           const stopping=list.at(-1)?.getAttribute('data-is-streaming')==='true'||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)));
           if(stopping)seenStop=true;

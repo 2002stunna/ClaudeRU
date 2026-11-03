@@ -54,16 +54,19 @@ export class DataStore {
     this.queue=write.catch(()=>{});await write;return this.modelCatalog;
   }
   async list(){await this.ready;return this.chats.filter(c=>!c.deleted);}
-  get deletionRevision(){return this.chats.filter(c=>c.deleted).length;}
+  get deletionRevision(){return this.chats.reduce((sum,c)=>sum+(c.visibilityChanges??(c.deleted?1:0)),0);}
   async deleteChat(chat,source='wrapper'){
-    if(!chat.deleted){chat.deleted=true;chat.deletedAt=Date.now();chat.deletionSource=source;await this.save(chat);}return chat;
+    if(!chat.deleted){chat.visibilityChanges=(chat.visibilityChanges||0)+1;chat.deleted=true;chat.deletedAt=Date.now();chat.deletionSource=source;await this.save(chat);}return chat;
+  }
+  async restoreLocal(chat){
+    if(chat.deleted&&chat.deletionSource==='local'){chat.visibilityChanges=(chat.visibilityChanges||1)+1;chat.deleted=false;await this.save(chat);}return chat;
   }
   async remoteDeletions(records){
     await this.ready;let changed=false;
     for(const record of records){
       const url=conversationURL(record.url);let chat=this.chats.find(c=>c.url===url);
       if(!chat){chat={id:randomUUID(),url,title:'Удалённый чат',messages:[],settings:{},loaded:false};this.chats.push(chat);}
-      if(chat.deleted)continue;chat.deleted=true;chat.deletedAt=Date.now();chat.updatedAt=chat.deletedAt;chat.deletionSource=record.kind;changed=true;
+      if(chat.deleted)continue;chat.visibilityChanges=(chat.visibilityChanges||0)+1;chat.deleted=true;chat.deletedAt=Date.now();chat.updatedAt=chat.deletedAt;chat.deletionSource=record.kind;changed=true;
     }
     if(changed)await this.persist();return this.deletionRevision;
   }

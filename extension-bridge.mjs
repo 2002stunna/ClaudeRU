@@ -27,15 +27,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='15'||req.headers['x-clauderu-page-protocol']!=='15'){
+        if(req.headers['x-clauderu-protocol']!=='16'||req.headers['x-clauderu-page-protocol']!=='16'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='15'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.7.0 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='16'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.8.0 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:15});
+          return json(426,{error:this.compatibilityError,requiredProtocol:16});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:15});
+        if(req.url==='/health')return json(200,{ok:true,protocol:16});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -91,7 +91,7 @@ export class ExtensionBridge {
   }
   async execute(payload, handlers={}) {
     const key=payload.chatId||payload.url||'default';
-    if([...this.jobs.values()].some(j=>j.key===key&&j.payload.kind!=='state'&&payload.kind!=='state'))throw Error('В этом чате уже выполняется запрос');
+    if([...this.jobs.values()].some(j=>j.key===key&&!['state','current'].includes(j.payload.kind)&&!['state','current'].includes(payload.kind)))throw Error('В этом чате уже выполняется запрос');
     if(this.jobs.size>=12)throw Error('Слишком много одновременных действий. Подождите завершения одного из них.');
     if(!this.status.connected)throw Error(this.status.error||'Расширение не подключено. Откройте вкладку Claude на Mac и подключите её через значок ClaudeRU.');
     if(payload.url)conversationURL(payload.url);

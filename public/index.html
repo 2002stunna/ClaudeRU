@@ -18,6 +18,12 @@
 <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
 <symbol id="i-code" viewBox="0 0 24 24"><path d="m7 6-5 6 5 6M17 6l5 6-5 6M14 3l-4 18"/></symbol>
 <symbol id="i-mac" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M12 16v5m-5 0h10"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="m16 3 5 5-4 2-3 6-3-3-6 6m2-11 6-3 3-2M7 8l9 9M5 21l2-2"/></symbol>
+<symbol id="i-unpin" viewBox="0 0 24 24"><path d="m16 3 5 5-4 2-2 4M7 8l6-3M6 9l9 9M4 20l6-6M3 3l18 18"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Z"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v13h14V8M9 12h6"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
 </defs></svg>
 <section id="login"><a class="login-brand" href="/">Claude<span>RU</span></a><h1>Ваш Claude.<br>Где бы вы ни были.</h1><p>Войдите в своё домашнее пространство.</p><form id="login-form"><label for="password">Пароль вашего сайта</label><input id="password" type="password" autocomplete="current-password" required><button>Войти <span>→</span></button></form><p id="login-error" role="alert"></p></section>
 <div id="app" hidden>
@@ -42,6 +48,6 @@
 <dialog id="files-library"><div class="preview-heading"><h2 id="files-title">Артефакты</h2><button id="close-files" class="icon-button" aria-label="Закрыть список файлов"><svg class="icon"><use href="#i-close"/></svg></button></div><p id="files-description"></p><div id="files-list"></div></dialog>
 <dialog id="rename-dialog"><form id="rename-form"><h2>Название разговора</h2><label class="sr-only" for="rename-title">Название</label><input id="rename-title" maxlength="160" required><div class="dialog-actions"><button type="button" id="cancel-rename">Отмена</button><button type="submit" class="primary-button">Сохранить</button></div></form></dialog>
 <div id="chat-context" class="popover chat-context" role="menu" aria-label="Действия с чатом" hidden></div>
-<dialog id="delete-dialog"><h2 id="delete-title"></h2><p>Это действие удалит разговор также на claude.ai.</p><div class="dialog-actions"><button id="cancel-delete">Отмена</button><button id="confirm-delete" class="danger">Удалить</button></div></dialog>
+<dialog id="delete-dialog"><h2 id="delete-title"></h2><p id="delete-note">Разговор будет удалён в Claude и в обёртке.</p><button id="delete-local" type="button" class="local-delete-choice">Удалить только из обёртки</button><div class="dialog-actions"><button id="cancel-delete">Отмена</button><button id="confirm-delete" class="danger">Удалить</button></div></dialog>
 <dialog id="group-dialog"><h2>Переместить в группу</h2><div id="group-list"></div><div class="dialog-actions"><button id="close-groups">Закрыть</button></div></dialog>
 </body></html>
