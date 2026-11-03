@@ -494,3 +494,28 @@ test('a disabled composer cannot submit until the native fieldset permits sendin
   const {page,run}=await fixture(t);await page.evaluate(()=>{const field=document.createElement('fieldset');for(const selector of ['[contenteditable]','#upload','#uploads','#send'])field.append(document.querySelector(selector));document.querySelector('main').prepend(field);field.disabled=true;const send=document.querySelector('#send'),original=send.onclick;send.onclick=()=>{window.sentBeforeEnabled=!window.enabledAt;original();};setTimeout(()=>{field.disabled=false;window.enabledAt=performance.now();},650);});
   const result=await run({kind:'chat',text:'Подожди готовности'});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sentBeforeEnabled),false);assert.ok(await page.evaluate(()=>window.submittedAt>=window.enabledAt));
 });
+test('a new-chat send button hidden by the native voice switch becomes ready after delayed editor hydration',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{
+    const field=document.createElement('fieldset');for(const selector of ['[contenteditable]','#upload','#uploads'])field.append(document.querySelector(selector));
+    const stack=document.createElement('div'),sendLayer=document.createElement('div'),voice=document.createElement('button');sendLayer.inert=true;sendLayer.style.visibility='hidden';sendLayer.append(document.querySelector('#send'));voice.type='button';voice.setAttribute('aria-label','Включить голосовой режим');voice.textContent='Голос';stack.append(sendLayer,voice);field.append(stack);document.querySelector('main').prepend(field);
+    window.sendCount=0;window.editorHydrated=false;window.inputEvents=0;const input=document.querySelector('[data-testid="chat-input"]'),send=document.querySelector('#send'),original=send.onclick;
+    input.addEventListener('input',()=>{window.inputEvents++;if(window.editorHydrated){sendLayer.inert=false;sendLayer.style.visibility='visible';voice.hidden=true;}});
+    send.onclick=()=>{window.sendCount++;window.clickedInert=sendLayer.inert;original();};setTimeout(()=>window.editorHydrated=true,300);
+  });
+  const result=await run({kind:'chat',text:'Привет, пришли картинку',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sendCount),1);assert.equal(await page.evaluate(()=>window.clickedInert),false);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Привет, пришли картинку');assert.ok(await page.evaluate(()=>window.inputEvents)>1);
+});
+test('a toolbar outside the editor fieldset is found without clicking Send in another form',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{const field=document.createElement('fieldset'),composer=document.createElement('section');field.append(document.querySelector('[contenteditable]'));composer.append(field,document.querySelector('#upload'),document.querySelector('#uploads'),document.querySelector('#send'));const unrelated=document.createElement('form');unrelated.innerHTML='<button type="button" aria-label="Отправить сообщение">Чужое поле</button>';window.wrongClicks=0;unrelated.querySelector('button').onclick=()=>window.wrongClicks++;composer.prepend(unrelated);document.querySelector('main').prepend(composer);});
+  const result=await run({kind:'chat',text:'Мой запрос',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.wrongClicks),0);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Мой запрос');
+});
+test('send is identified by aria-labelledby and a replaced button must settle before its single click',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{const input=document.querySelector('[data-testid="chat-input"]'),send=document.querySelector('#send');send.removeAttribute('data-testid');send.removeAttribute('aria-label');send.setAttribute('aria-labelledby','send-caption');send.textContent='↑';const caption=document.createElement('span');caption.id='send-caption';caption.hidden=true;caption.textContent='Send a message';document.body.append(caption);window.sendCount=0;const original=send.onclick;send.onclick=()=>{window.sendCount++;original();};input.addEventListener('input',()=>setTimeout(()=>{const old=document.querySelector('#send'),replacement=old.cloneNode(true);replacement.onclick=old.onclick;old.replaceWith(replacement);window.buttonReplacedAt=performance.now();},180),{once:true});});
+  const result=await run({kind:'chat',text:'Сообщение',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.sendCount),1);assert.ok(await page.evaluate(()=>window.submittedAt-window.buttonReplacedAt)>=390);
+});
+test('repairing a hidden send button preserves a manual edit made while Claude is loading',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(()=>{document.querySelector('#send').disabled=true;window.sendCount=0;document.querySelector('#send').onclick=()=>window.sendCount++;document.querySelector('[data-testid="chat-input"]').addEventListener('input',()=>setTimeout(()=>document.querySelector('[data-testid="chat-input"]').innerText='Ручная правка',200),{once:true});});
+  const result=await run({kind:'chat',text:'Мой запрос',catalogCache:mockCatalog()});assert.equal(result.notSent,true);assert.match(result.error,/изменился/);assert.equal(await page.locator('[data-testid="chat-input"]').innerText(),'Ручная правка');assert.equal(await page.evaluate(()=>window.sendCount),0);
+});

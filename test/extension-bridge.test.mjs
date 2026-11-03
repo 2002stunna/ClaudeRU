@@ -5,7 +5,7 @@ const origin='chrome-extension://'+'a'.repeat(32);
 async function fixture(t,timeout=2000){
   const bridge=new ExtensionBridge({timeout});await bridge.open(0);t.after(()=>bridge.close());
   const base=`http://127.0.0.1:${bridge.server.address().port}`;
-  const call=(path,body,token=bridge.token,from=origin)=>fetch(base+path,{method:body?'POST':'GET',headers:{Origin:from,Authorization:'Bearer '+token,'X-ClaudeRU-Protocol':'13','X-ClaudeRU-Page-Protocol':'13','X-ClaudeRU-Version':'0.6.0',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+  const call=(path,body,token=bridge.token,from=origin)=>fetch(base+path,{method:body?'POST':'GET',headers:{Origin:from,Authorization:'Bearer '+token,'X-ClaudeRU-Protocol':'14','X-ClaudeRU-Page-Protocol':'14','X-ClaudeRU-Version':'0.6.1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
   return{bridge,call,base};
 }
 test('extension protocol requires pairing and rejects website origins',async t=>{
@@ -56,9 +56,9 @@ test('old extension or stale page cannot collect jobs and status explains how to
   const raw=(headers={})=>fetch(base+'/poll',{headers:{Origin:origin,Authorization:'Bearer '+bridge.token,...headers}});
   let response=await raw();assert.equal(response.status,426);assert.match((await response.json()).error,/старая версия расширения/);
   assert.equal(bridge.status.connected,false);await assert.rejects(bridge.execute({kind:'inspect'}),/старая версия/);
-  response=await raw({'X-ClaudeRU-Protocol':'13','X-ClaudeRU-Page-Protocol':'0','X-ClaudeRU-Version':'0.6.0'});
+  response=await raw({'X-ClaudeRU-Protocol':'14','X-ClaudeRU-Page-Protocol':'0','X-ClaudeRU-Version':'0.6.1'});
   assert.equal(response.status,426);assert.match(bridge.status.error,/вкладка Claude/);
-  assert.equal((await call('/health')).status,200);assert.equal(bridge.status.connected,true);assert.equal(bridge.status.error,null);assert.equal(bridge.status.extensionVersion,'0.6.0');
+  assert.equal((await call('/health')).status,200);assert.equal(bridge.status.connected,true);assert.equal(bridge.status.error,null);assert.equal(bridge.status.extensionVersion,'0.6.1');
   const waiting=bridge.execute({kind:'inspect'});
   response=await raw();const refused=await response.json();assert.equal(response.status,426);assert.equal(refused.id,undefined);assert.equal(bridge.pending.delivered,false);
   const job=await(await call('/poll')).json();assert.equal(job.kind,'inspect');
@@ -82,7 +82,7 @@ test('an idle poll completes in about one second',async t=>{
 });
 test('a closed poll is removed before it can consume a new job',async t=>{
   const {bridge,base,call}=await fixture(t);const controller=new AbortController();
-  const response=fetch(base+'/poll',{headers:{Origin:origin,Authorization:'Bearer '+bridge.token,'X-ClaudeRU-Protocol':'13','X-ClaudeRU-Page-Protocol':'13'},signal:controller.signal}).catch(e=>e);
+  const response=fetch(base+'/poll',{headers:{Origin:origin,Authorization:'Bearer '+bridge.token,'X-ClaudeRU-Protocol':'14','X-ClaudeRU-Page-Protocol':'14'},signal:controller.signal}).catch(e=>e);
   await waitForPolls(bridge,1);controller.abort();await response;await waitForPolls(bridge,0);
   const sending=bridge.execute({kind:'inspect'});const job=await(await call('/poll')).json();assert.equal(job.kind,'inspect');await call('/event',{id:job.id,type:'done'});await sending;
 });
