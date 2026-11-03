@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "ClaudeRU — домашний мост",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Связывает выбранную вкладку Claude с вашим домашним сервером ClaudeRU.",
   "permissions": [
     "storage",
     "alarms",
-    "downloads"
+    "downloads",
+    "webRequest"
   ],
   "host_permissions": [
     "http://127.0.0.1:3001/*",

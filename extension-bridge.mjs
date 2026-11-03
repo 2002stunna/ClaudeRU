@@ -27,15 +27,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='14'||req.headers['x-clauderu-page-protocol']!=='14'){
+        if(req.headers['x-clauderu-protocol']!=='15'||req.headers['x-clauderu-page-protocol']!=='15'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='14'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.6.1 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='15'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.7.0 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:14});
+          return json(426,{error:this.compatibilityError,requiredProtocol:15});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:14});
+        if(req.url==='/health')return json(200,{ok:true,protocol:15});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -52,10 +52,17 @@ export class ExtensionBridge {
         res.on('close',cleanup);
         return;
       }
-      if (req.method === 'POST' && req.url === '/event') {
+      if (req.method === 'POST' && ['/event','/deletions'].includes(req.url)) {
         try {
           let size=0; const chunks=[]; for await (const chunk of req) { size+=chunk.length; if(size>36_000_000) return json(413,{error:'Too large'});chunks.push(chunk); }
-          const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));const job=this.jobs.get(event.id);
+          const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if(req.url==='/deletions'){
+            if(!Array.isArray(event.deletions)||event.deletions.length>100||!event.deletions.length||event.deletions.some(r=>!['deleted','missing'].includes(r?.kind)))return json(400,{error:'Invalid deletions'});
+            const records=event.deletions.map(r=>({url:conversationURL(r.url),kind:r.kind}));
+            if(!this.onDeleted)return json(503,{error:'История пока не готова'});
+            await this.onDeleted(records);return json(200,{ok:true});
+          }
+          const job=this.jobs.get(event.id);
           if (!job || event.id !== job.id) return json(409,{error:'Задание уже завершено'});
           if (event.type === 'update') {
             if(typeof event.text!=='string') return json(400,{error:'Invalid text'});

@@ -2,6 +2,7 @@ import { MODEL_NAMES } from '/model-catalog.js';
 const $=id=>document.getElementById(id);
 let chats=[],selected=null,operation=false,initializing=false,sending=new Set(),catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
 let statusRequestInFlight=false,stateRequestInFlight=false,contextChat=null,renameTarget=null,archiveView=false,pendingSelection=null;const remoteBusy=new Set();
+let historyRequestInFlight=false,historyRevision=-1;
 const busyHere=()=>sending.has(selected)||remoteBusy.has(selected);
 const messageNodes=new WeakMap();
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
@@ -11,7 +12,7 @@ const status=text=>{$('status').textContent=text;$('status').hidden=!text;};
 const svg=name=>{const node=document.createElementNS('http://www.w3.org/2000/svg','svg');node.classList.add('icon');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-'+name);node.append(use);return node;};
 async function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
 async function api(path,body){const r=body===undefined?await fetch(path):await post(path,body);const data=await r.json();if(!r.ok){if(r.status===401){$('app').hidden=true;$('login').hidden=false;}throw Error(data.error||'Ошибка соединения');}return data;}
-function upsert(chat){const i=chats.findIndex(c=>c.id===chat.id);if(i<0)chats.unshift(chat);else chats[i]=chat;return chat;}
+function upsert(chat){if(chat.deleted){chats=chats.filter(c=>c.id!==chat.id);return chat;}const i=chats.findIndex(c=>c.id===chat.id);if(i<0)chats.unshift(chat);else chats[i]=chat;return chat;}
 function formatSize(size){return size>=1024*1024?(size/1024/1024).toFixed(1)+' МБ':Math.max(1,Math.ceil(size/1024))+' КБ';}
 function fileCard(file,removable=false){
   const card=document.createElement('div');card.className='file-card';
@@ -82,6 +83,8 @@ function renderOptions(){
 }
 function renderAttachments(){$('attachments').replaceChildren(...(draft().files||[]).map(f=>fileCard(f,true)));updateControls();}
 function updateControls(){const blocked=initializing||operation||busyHere()||current()?.claudeState?.streaming===true;
+  const contextBlocked=initializing||operation||sending.has(contextChat)||remoteBusy.has(contextChat)||!chats.some(c=>c.id===contextChat);
+  for(const button of $('chat-context').querySelectorAll('button'))button.disabled=contextBlocked;
   for(const id of ['model-toggle','sync','refresh-models','refresh-chat','attach','other-models-trigger','effort-menu-trigger','chat-title-button'])$(id).disabled=blocked;
   for(const button of document.querySelectorAll('#model-submenu button,#effort-options button'))button.disabled=blocked||button.dataset.available==='false';
   $('selected-model').disabled=blocked||$('current-model-name').textContent==='Подключите Claude';
@@ -98,7 +101,7 @@ async function selectChat(id){
 function finishOperation(){operation=false;updateControls();const id=pendingSelection;pendingSelection=null;if(id&&selected===id&&!busyHere())void refreshSelected(id);}
 async function refreshSelected(id=selected,{collectArtifacts=false}={}){
   if(operation)return;operation=true;updateControls();
-  try{const data=await api('/api/chats/open',{id,collectArtifacts});upsert(data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}}
+  try{const data=await api('/api/chats/open',{id,collectArtifacts});if(data.removed){chats=chats.filter(c=>c.id!==id);if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);closePopovers();if(selected===id){const next=chats.find(c=>!c.archived);if(next)await selectChat(next.id);else await newChat();}else renderSidebar();return;}upsert(data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}if(selected===id){render();status((data.warnings||[]).join(' '));}}
   catch(e){if(selected===id)status(e.message);}finally{finishOperation();}
 }
 async function sync({quiet=false,refreshCatalog=false}={}){
@@ -109,7 +112,7 @@ async function sync({quiet=false,refreshCatalog=false}={}){
 async function showApp(){
   initializing=true;updateControls();$('login').hidden=true;$('app').hidden=false;
   try{
-    ({chats}=await api('/api/chats'));
+    const history=await api('/api/chats');chats=history.chats;if(Number.isInteger(history.historyRevision))historyRevision=history.historyRevision;
     if(!localStorage.getItem('clauderu-migrated')){
       let legacy=[];try{legacy=JSON.parse(localStorage.getItem('clauderu-chats')||'[]');}catch{}
       if(Array.isArray(legacy)&&legacy.some(c=>c.messages?.length))({chats}=await api('/api/chats/import',{chats:legacy.filter(c=>c.messages?.length)}));
@@ -192,6 +195,7 @@ async function performChatAction(id,action,fields={}){
   closePopovers();if(operation||sending.has(id)||remoteBusy.has(id))return;operation=true;updateControls();status('');
   try{
     const data=await api('/api/chats/action',{id,action,...fields});
+    if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);
     if(data.groups){$('group-list').replaceChildren();for(const group of data.groups){const button=document.createElement('button');button.textContent=group;button.onclick=()=>{$('group-dialog').close();void performChatAction(id,'move',{group});};$('group-list').append(button);}if(!data.groups.length)$('group-list').textContent='В Claude пока нет доступных групп.';$('group-dialog').showModal();}
     else{if(action==='delete')chats=chats.filter(c=>c.id!==id);else if(data.chat)upsert(data.chat);$('rename-dialog').close();if(id===selected&&['delete','archive'].includes(action)){selected=chats.find(c=>!c.archived)?.id||null;if(!selected){operation=false;await newChat();operation=true;}}render();status('');}
   }catch(e){status(e.message);}finally{finishOperation();}
@@ -201,7 +205,7 @@ function openChatContext(chat,trigger){
   for(const [action,text] of [['unread','Отметить как непрочитанное'],[chat.pinned?'unpin':'pin',chat.pinned?'Открепить':'Закрепить'],['rename','Переименовать'],['move','Переместить в группу'],['archive','Архивировать'],['delete','Удалить']]){
     const button=document.createElement('button');button.type='button';button.setAttribute('role','menuitem');button.dataset.action=action;button.textContent=text;button.disabled=operation||sending.has(chat.id)||remoteBusy.has(chat.id);if(action==='delete')button.className='danger';button.onclick=()=>{if(action==='rename')requestRename(chat);else if(action==='delete'){closePopovers();$('delete-title').textContent='Удалить «'+chat.title+'» из Claude?';$('delete-dialog').showModal();}else void performChatAction(chat.id,action);};menu.append(button);
   }
-  const rect=trigger.getBoundingClientRect();menu.hidden=false;menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-300))+'px';menu.style.top=Math.max(8,Math.min(rect.bottom,innerHeight-menu.offsetHeight-8))+'px';menu.querySelector('button:not(:disabled)')?.focus();
+  updateControls();const rect=trigger.getBoundingClientRect();menu.hidden=false;menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-300))+'px';menu.style.top=Math.max(8,Math.min(rect.bottom,innerHeight-menu.offsetHeight-8))+'px';menu.querySelector('button:not(:disabled)')?.focus();
 }
 $('confirm-delete').onclick=()=>{$('delete-dialog').close();void performChatAction(contextChat,'delete');};$('cancel-delete').onclick=()=>$('delete-dialog').close();$('close-groups').onclick=()=>$('group-dialog').close();
 $('show-archive').onclick=()=>{archiveView=!archiveView;$('show-archive').classList.toggle('active',archiveView);renderSidebar();};
@@ -217,7 +221,18 @@ document.addEventListener('keydown',e=>{
   if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){const menu=document.activeElement?.closest('[role="menu"]');if(!menu)return;const buttons=[...menu.querySelectorAll('button:not(:disabled)')].filter(b=>b.getClientRects().length);if(!buttons.length)return;e.preventDefault();const i=buttons.indexOf(document.activeElement);const index=e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;buttons[index].focus();}
   if(e.key==='ArrowLeft'&&!$('model-menu').hidden){closeSubmenus();$('other-models-trigger').focus();}
 });
-async function bridgeStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const r=await fetch('/api/bridge',{signal:AbortSignal.timeout(5000)});if(!r.ok)return;const state=await r.json();remoteBusy.clear();for(const job of state.activeChats||[])if(job.kind==='chat')remoteBusy.add(job.id);updateControls();if(state.connected&&!operation&&!busyHere()&&current()?.verifiedAt)void refreshState();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!busyHere()){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&(!catalog||!lastSyncAttempt)&&!operation&&!busyHere()&&Date.now()-lastSyncAttempt>20000)void sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}finally{statusRequestInFlight=false;}}
+async function bridgeStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const r=await fetch('/api/bridge',{signal:AbortSignal.timeout(5000)});if(!r.ok)return;const state=await r.json();remoteBusy.clear();for(const job of state.activeChats||[])if(job.kind==='chat')remoteBusy.add(job.id);updateControls();if(Number.isInteger(state.historyRevision)&&state.historyRevision!==historyRevision&&!operation)void refreshHistory(state.historyRevision);if(state.connected&&!operation&&!busyHere()&&current()?.verifiedAt)void refreshState();document.querySelector('.badge').textContent=state.connected?'Mac подключён':'Mac не подключён';document.querySelector('.badge').dataset.connected=String(state.connected);$('account-toggle').querySelector('.account-state').textContent=state.connected?'Домашний Mac · онлайн':'Домашний Mac · офлайн';if(state.error){lastBridgeError=state.error;catalogError=state.error;if(!operation&&!busyHere()){status(state.error);renderOptions();}}else if(lastBridgeError){if(catalogError===lastBridgeError)catalogError='';if($('status').textContent===lastBridgeError)status('');lastBridgeError=null;renderOptions();}if(state.connected&&!state.busy&&(!catalog||!lastSyncAttempt)&&!operation&&!busyHere()&&Date.now()-lastSyncAttempt>20000)void sync({quiet:true});}catch{document.querySelector('.badge').textContent='Нет связи с Mac';}finally{statusRequestInFlight=false;}}
+async function refreshHistory(expectedRevision){
+  if(historyRequestInFlight||operation||initializing)return;historyRequestInFlight=true;
+  try{
+    const data=await api('/api/chats');if(operation||data.historyRevision<expectedRevision||data.historyRevision<historyRevision)return;
+    historyRevision=data.historyRevision;const previous=selected;
+    chats=data.chats.map(chat=>sending.has(chat.id)?chats.find(local=>local.id===chat.id)||chat:chat);
+    if(contextChat&&!chats.some(c=>c.id===contextChat))closePopovers();
+    if(!current()){selected=chats.find(c=>!c.archived)?.id||null;if(!selected){await newChat();return;}localStorage.setItem('clauderu-selected',selected);}
+    if(selected!==previous){status('');render();if(!busyHere())await refreshSelected();}else{renderSidebar();updateControls();}
+  }catch{/* Retry on the next history revision poll. */}finally{historyRequestInFlight=false;}
+}
 async function refreshState(){
   if(stateRequestInFlight)return;stateRequestInFlight=true;const id=selected,settingsBefore=current()?.settings;
   try{const data=await api('/api/chats/state',{id});if(data.state){const chat=chats.find(c=>c.id===id);if(chat&&chat.settings===settingsBefore&&!operation){const changed=JSON.stringify(chat.claudeState)!==JSON.stringify(data.state);chat.settings={model:data.state.model||'',effort:data.state.effort||''};chat.claudeState=data.state;if(selected===id&&changed)renderOptions();}}}catch{}finally{stateRequestInFlight=false;}

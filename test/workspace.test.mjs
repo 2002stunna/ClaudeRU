@@ -72,6 +72,11 @@ test('native chat metadata is saved only after confirmation and deleted chats st
   response=await(await post('/api/chats/action',{id:chat.id,action:'delete'})).json();assert.equal(response.chat.deleted,true);
   await post('/api/sync',{});assert.equal((await store.list()).length,0);await assert.rejects(store.get(chat.id),/не найден/);
 });
+test('opening a conversation confirmed unavailable removes the old local row and prevents stale index resurrection',async t=>{
+  const store=new DataStore();await store.saveModelCatalog(mockCatalog());const chat=await store.create({url:'https://claude.ai/chat/gone-before-update',title:'Gone before update'});
+  const bridge={status:{connected:true},execute:async()=>({unavailable:true,url:chat.url})},server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));const base=`http://127.0.0.1:${server.address().port}`;let cookie='';const post=(path,body)=>fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)});cookie=(await post('/api/login',{password:'pw'})).headers.get('set-cookie').split(';')[0];
+  const result=await(await post('/api/chats/open',{id:chat.id})).json();assert.equal(result.removed,true);assert.equal(result.id,chat.id);assert.equal(result.historyRevision,1);await store.importIndex([{url:chat.url,title:'Stale sidebar'}]);assert.equal((await store.list()).length,0);
+});
 test('one generating chat does not block opening, configuring or sending in another chat',async t=>{
   const store=new DataStore(),a=await store.create(),b=await store.create(),jobs=[];let finish,entered;
   a.url='https://claude.ai/chat/'+a.id;await store.save(a);const started=new Promise(r=>entered=r),hold=new Promise(r=>finish=r);t.after(()=>finish());

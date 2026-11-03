@@ -8,6 +8,7 @@ import { MODEL_NAMES, isModelCacheComplete, catalogFor } from './model-catalog.m
 import { DataStore, chatOptions, MAX_FILES, MAX_TOTAL } from './data-store.mjs';
 
 export function createApp({ auth, bridge, secure = false, store = new DataStore() }) {
+  bridge.onDeleted=records=>store.remoteDeletions(records);
   const sessions = new Map();let failures = [];const active=new Map();
   let catalogInitialization=null,catalogWarning='';
   const assets = {'/model-catalog.js':['../model-catalog.mjs','text/javascript; charset=utf-8'], '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
@@ -60,7 +61,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
     if(action==='pin'||action==='unpin')chat.pinned=action==='pin';
     if(action==='unread')chat.unread=true;
     if(action==='archive')chat.archived=true;
-    if(action==='delete')chat.deleted=true;
+    if(action==='delete'){await store.deleteChat(chat);return {chat,historyRevision:store.deletionRevision};}
     if(action==='move')chat.group=fields.group;
     await store.save(chat);return {chat};
   }
@@ -78,8 +79,8 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
       if(req.method==='GET'){
         if(req.url==='/api/session')return json(200,{authenticated:!!authorized});
         if(!authorized)return json(401,{error:'Войдите в систему'});
-        if(req.url==='/api/bridge')return json(200,{...(bridge.status||{mode:'browser',connected:true}),busy:active.size>0,activeChats:[...active.entries()].map(([id,kind])=>({id,kind}))});
-        if(req.url==='/api/chats')return json(200,{chats:await store.list()});
+        if(req.url==='/api/bridge')return json(200,{...(bridge.status||{mode:'browser',connected:true}),historyRevision:store.deletionRevision,busy:active.size>0,activeChats:[...active.entries()].map(([id,kind])=>({id,kind}))});
+        if(req.url==='/api/chats')return json(200,{chats:await store.list(),historyRevision:store.deletionRevision});
         const fileMatch=/^\/api\/files\/([a-f0-9]{32})(\?preview=1)?$/.exec(req.url);
         if(fileMatch){
           try { const {meta,bytes}=await store.readFile(fileMatch[1]);const inline=!!fileMatch[2]&&/^image\/(png|jpeg|gif|webp|avif|bmp)$/i.test(meta.type);res.writeHead(200,{'Content-Type':meta.type,'Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encodeURIComponent(meta.name.toWellFormed())}`,'Content-Length':bytes.length});res.end(bytes); }
@@ -161,6 +162,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           }
           const chat=await store.get(body.id);
           const result=await executeWithCatalog({kind:'open',chatId:chat.id,url:chat.url,collectArtifacts:body.collectArtifacts===true});
+          if(result?.unavailable===true){await store.deleteChat(chat,'missing');return json(200,{removed:true,id:chat.id,historyRevision:store.deletionRevision});}
           if(result?.snapshot)await applySnapshot(chat,result.snapshot);chat.unread=false;
           if(result?.catalog){applyState(chat,result.catalog.current);chat.catalog=result.catalog;await store.save(chat);}
           return json(200,{chat,catalog:result.catalog,warnings:result.warnings||[]});

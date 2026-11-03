@@ -54,6 +54,19 @@ export class DataStore {
     this.queue=write.catch(()=>{});await write;return this.modelCatalog;
   }
   async list(){await this.ready;return this.chats.filter(c=>!c.deleted);}
+  get deletionRevision(){return this.chats.filter(c=>c.deleted).length;}
+  async deleteChat(chat,source='wrapper'){
+    if(!chat.deleted){chat.deleted=true;chat.deletedAt=Date.now();chat.deletionSource=source;await this.save(chat);}return chat;
+  }
+  async remoteDeletions(records){
+    await this.ready;let changed=false;
+    for(const record of records){
+      const url=conversationURL(record.url);let chat=this.chats.find(c=>c.url===url);
+      if(!chat){chat={id:randomUUID(),url,title:'Удалённый чат',messages:[],settings:{},loaded:false};this.chats.push(chat);}
+      if(chat.deleted)continue;chat.deleted=true;chat.deletedAt=Date.now();chat.updatedAt=chat.deletedAt;chat.deletionSource=record.kind;changed=true;
+    }
+    if(changed)await this.persist();return this.deletionRevision;
+  }
   async get(id){await this.ready;const chat=this.chats.find(c=>c.id===id&&!c.deleted);if(!chat)throw Error('Чат не найден');return chat;}
   async create({title='Новый разговор',url=null,messages=[],settings={}}={}) {
     await this.ready;if(url)url=conversationURL(url);

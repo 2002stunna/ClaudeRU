@@ -90,20 +90,20 @@
   function quickCatalog(warning=''){const current=readState();return {models:[...MODELS],byModel:JSON.parse(JSON.stringify(modelCache)),efforts:modelCache[current.model]?.efforts||[],current,...(warning?{warning}:{})};}
   function targetLinks(url){return all('a[href]').filter(a=>{try{const u=new URL(a.href);return u.origin+u.pathname===url;}catch{return false;}});}
   function targetMenuButton(url){
-    for(const link of targetLinks(url)){
+    for(const link of targetLinks(url).filter(activeControl)){
       let row=link.parentElement;
       for(let i=0;row&&i<4;i++,row=row.parentElement){
         // Never broaden the search to other conversations in the sidebar.
         const links=all('a[href]',row).filter(a=>{try{return /^\/chat\//.test(new URL(a.href).pathname);}catch{return false;}});
         if(links.some(a=>!targetLinks(url).includes(a)))break;
-        const button=all('[data-row-action],button,[role="button"]',row).find(n=>n.hasAttribute('data-row-action')||n.getAttribute('aria-haspopup')==='menu'||/more|дополн|действ|меню|options|ellipsis/i.test(n.getAttribute('aria-label')||'')||/^(⋯|…|\.\.\.)$/.test(label(n)));
+        const button=all('[data-row-action],button,[role="button"]',row).find(n=>activeControl(n)&&(n.hasAttribute('data-row-action')||n.getAttribute('aria-haspopup')==='menu'||/more|дополн|действ|меню|options|ellipsis/i.test(n.getAttribute('aria-label')||'')||/^(⋯|…|\.\.\.)$/.test(label(n))));
         if(button)return button;
         if(row.matches('aside,nav,[data-testid="sidebar"]'))break;
       }
     }
     if(chatURL()!==url)return null;
-    const header=document.querySelector('[data-testid="chat-header"]');
-    return header&&all('button',header).find(n=>n.getAttribute('aria-haspopup')==='menu'&&!/share|поделиться|model|модель/i.test(label(n)));
+    const header=all('[data-testid="session-title-split"],[data-testid="chat-header"]').find(activeControl);
+    return header&&all('button',header).find(n=>activeControl(n)&&(n.getAttribute('aria-haspopup')==='menu'||[n.getAttribute('aria-label'),n.getAttribute('title'),label(n)].some(value=>/дополнительные параметры|more options/i.test(value||'')))&&!/share|поделиться|model|модель/i.test(label(n)));
   }
   async function openChatMenu(url=chatURL()){
     await closeMenus();let button;
@@ -111,12 +111,16 @@
     button.click();await waitFor(()=>all('[role="menuitem"],[role="menuitemradio"]').some(visible),4000);
   }
   const actionPatterns={rename:/^(переименовать|rename)/i,pin:/^(закрепить|pin)/i,unpin:/^(открепить|unpin)/i,unread:/^(отметить как непрочитан|mark as unread)/i,archive:/^(архивировать|archive)/i,delete:/^(удалить|delete)/i,move:/^(переместить в группу|move to (?:group|project)|переместить в проект)/i};
+  function conversationUnavailable(){
+    if(!chatURL())return false;
+    return all('main [role="alert"],main h1,main h2,main p,[data-testid="conversation-not-found"]').some(n=>visible(n)&&outsideTranscript(n)&&label(n).length<600&&/(?:conversation|chat) (?:was |could )?not (?:be )?found|(?:conversation|chat) (?:does not|doesn't) exist|(?:чат|разговор|диалог) не найден/i.test(label(n)));
+  }
   async function manageChat(message){
     const pattern=actionPatterns[message.action];if(!pattern)throw Error('Неизвестное действие с чатом');
     if(chatURL()!==message.url)throw Error('Вкладка Claude открыта на другом чате. Обновите разговор.');
     await openChatMenu(message.url);const item=choices().find(n=>n.closest('[role="menu"]')&&pattern.test(label(n)));
     if(!item||item.disabled||item.getAttribute('aria-disabled')==='true'){await closeMenus();throw Error('Действие недоступно в меню Claude');}
-    const hadLink=targetLinks(message.url).length>0;
+    const hadLink=targetLinks(message.url).some(activeControl);
     const dialogsBefore=new Map(all('[role="alertdialog"],[role="dialog"],dialog').filter(visible).map(n=>[n,label(n)]));
     const noticesBefore=new Set(all('[role="status"],[role="alert"]').filter(visible).map(label));
     if(message.action==='move'){
@@ -132,7 +136,7 @@
       const dialog=input.closest('[role="dialog"],dialog');const confirm=all('button',dialog).find(b=>/^(сохранить|save|переименовать|rename)$/i.test(label(b)));if(!confirm)throw Error('Не найдена кнопка сохранения имени в Claude');confirm.click();
       await waitFor(()=>!visible(dialog)&&chatIndex().some(c=>c.url===message.url&&c.title===message.title),3000);
     }else if(['delete','archive'].includes(message.action)){
-      const applied=()=>hadLink&&!targetLinks(message.url).length||(location.origin==='https://claude.ai'&&['/','/new'].includes(location.pathname))||all('[role="status"],[role="alert"]').some(n=>visible(n)&&!noticesBefore.has(label(n))&&!/ошиб|не\s+(?:был[аи]?\s+)?(?:удал|архив)|не удалось|failed|error|not\s+(?:deleted|archived)/i.test(label(n))&&(message.action==='delete'?/удал[её]н(?:а|о|ы)?(?:[\s.!,:;]|$)|deleted\b/i:/архивирован(?:а|о|ы)?(?:[\s.!,:;]|$)|archived\b/i).test(label(n)));
+      const applied=()=>hadLink&&!targetLinks(message.url).some(activeControl)||(location.origin==='https://claude.ai'&&['/','/new'].includes(location.pathname))||all('[role="status"],[role="alert"]').some(n=>visible(n)&&!noticesBefore.has(label(n))&&!/ошиб|не\s+(?:был[аи]?\s+)?(?:удал|архив)|не удалось|failed|error|not\s+(?:deleted|archived)/i.test(label(n))&&(message.action==='delete'?/удал[её]н(?:а|о|ы)?(?:[\s.!,:;]|$)|deleted\b/i:/архивирован(?:а|о|ы)?(?:[\s.!,:;]|$)|archived\b/i).test(label(n)));
       const dialog=await waitFor(()=>{const failure=all('[role="alert"],[role="status"]').find(n=>visible(n)&&!noticesBefore.has(label(n))&&/ошиб|не\s+(?:был[аи]?\s+)?(?:удал|архив)|не удалось|failed|error|not\s+(?:deleted|archived)/i.test(label(n)));if(failure)throw Error(label(failure));const next=all('[role="alertdialog"],[role="dialog"],dialog').find(n=>visible(n)&&(!dialogsBefore.has(n)||dialogsBefore.get(n)!==label(n))&&all('button',n).some(b=>pattern.test(label(b))));return next||applied()&&{completed:true};},6000);
       if(!dialog.completed){const confirm=await waitFor(()=>all('button',dialog).find(n=>pattern.test(label(n))&&!n.disabled&&n.getAttribute('aria-disabled')!=='true'),4000);confirm.click();await waitFor(()=>!visible(dialog)&&applied(),8000);}
     }else{
@@ -296,7 +300,7 @@
     const describe=node=>({tag:node.tagName,testId:node.getAttribute('data-testid'),role:node.getAttribute('role'),label:(node.getAttribute('aria-label')||node.getAttribute('title')||node.getAttribute('alt')||'').slice(0,160),parents:[...function*(n){for(let i=0;n&&i<5;i++,n=n.parentElement)yield n.tagName+(n.getAttribute('data-testid')?'[data-testid='+n.getAttribute('data-testid')+']':'')+(n.getAttribute('role')?'[role='+n.getAttribute('role')+']':'');}(node.parentElement)]});
     const root=responses().at(-1),scope=root?assistantFileScope(root):null;
     const imageInfo=img=>({...describe(img),inLastTurn:!!scope?.contains(img),width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,complete:img.complete,source:address(img.currentSrc||img.src)});
-    return {version:14,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
+    return {version:15,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
   }
   const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
   function pdfCards(root){
@@ -450,7 +454,7 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:14});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:15});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(message.kind==='diagnostics'){respond({done:true,result:fileDiagnostics()});return;}
@@ -466,7 +470,8 @@
         }
         if(message.kind==='manage'){const result=await manageChat(message);respond({done:true,result});return;}
         if(message.kind==='open'){
-          await waitFor(()=>responses().length||all('[data-testid="user-message"]').length||editor());
+          await waitFor(()=>conversationUnavailable()||responses().length||all('[data-testid="user-message"]').length||editor());
+          if(conversationUnavailable()){respond({done:true,result:{unavailable:true,url:message.url}});return;}
           const state=snapshot(),generated=await collectFiles({openArtifact:message.collectArtifacts===true});const last=state.messages.findLast(m=>m.role==='assistant');if(last)last.files=generated.files;
           respond({done:true,result:{snapshot:state,catalog:await inspectCatalog(),warnings:generated.warnings}});return;
         }
