@@ -1,6 +1,7 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
   let busy=false, modelCache={}, managedCache=false, activeJobId=null, ownedDraft=null;
+  const pageInstance=crypto.randomUUID();
   const downloadedCards=new WeakMap();
   const MODELS=['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5'];
   // Timers in a hidden Claude tab can be throttled for seconds. The extension's
@@ -16,6 +17,25 @@
     const cards=new Set(pdfCards(node).map(c=>c.container));
     const read=n=>{if(n.nodeType===3)return n.textContent;if(n.nodeType!==1)return '';if(cards.has(n))return '';if(n.matches('button,[role="button"],[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="attachment"],[aria-hidden="true"],.sr-only,[data-testid="message-actions"],[data-testid="user-message-actions"],script,style'))return '';if(n.tagName==='BR')return '\n';if(n.tagName==='PRE')return '\n'+n.textContent+'\n';const text=[...n.childNodes].map(read).join('');return /^(P|DIV|LI|H[1-6]|SECTION|ARTICLE|BLOCKQUOTE)$/.test(n.tagName)?text+'\n':text;};
     return read(node).replace(/\n{3,}/g,'\n\n').trim();
+  }
+  function messageFormat(node){
+    const cards=new Set(pdfCards(node).map(c=>c.container)),tags=new Set('p br strong em s u h1 h2 h3 h4 h5 h6 ul ol li blockquote pre code hr table thead tbody tfoot tr th td sup sub a dl dt dd math mrow mi mn mo mtext mfrac msqrt mroot msub msup msubsup munder mover munderover mtable mtr mtd mspace menclose mpadded mstyle semantics'.split(' '));let count=0,size=0;
+    const read=(n,depth=0)=>{
+      if(++count>20000||depth>40)return [];
+      if(n.nodeType===3){size+=n.textContent.length;return size<=500000?[n.textContent]:[];}if(n.nodeType!==1||cards.has(n))return [];
+      if(n.matches('button,[role="button"],[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="attachment"],[aria-hidden="true"],.sr-only,[data-testid="message-actions"],[data-testid="user-message-actions"],script,style,iframe,object,svg,img,annotation,annotation-xml'))return [];
+      let tag=n.tagName.toLowerCase();tag=({b:'strong',i:'em',del:'s'})[tag]||tag;
+      if(n.matches('.katex')){const math=n.querySelector('math');if(math)return read(math,depth+1);}
+      const children=[...n.childNodes].flatMap(child=>read(child,depth+1));if(!tags.has(tag))return tag==='div'&&children.length&&!n.querySelector('p,div,ul,ol,pre,table,h1,h2,h3,h4,h5,h6')?[{tag:'p',children}]:children;
+      const out={tag,children};if(tag==='a'&&n.hasAttribute('href')&&!n.hasAttribute('download')){try{const url=new URL(n.getAttribute('href'),location.href);if(!(url.origin===location.origin&&/^\/(?:api\/.*\/files\/|files\/|artifacts\/)/.test(url.pathname)))out.href=url.href;}catch{}}
+      if(tag==='ol'&&n.hasAttribute('start'))out.start=Number(n.getAttribute('start'));if(tag==='li'&&n.hasAttribute('value'))out.value=Number(n.getAttribute('value'));
+      if(tag==='th'||tag==='td'){out.colSpan=n.colSpan;out.rowSpan=n.rowSpan;}
+      if(tag==='code'){const lang=n.className.match?.(/(?:language|lang)-([\w+-]+)/)?.[1];if(lang)out.language=lang;}
+      if(tag==='math')out.display=n.getAttribute('display')==='block'||n.closest('.katex-display')?'block':'inline';if(n.hasAttribute('mathvariant'))out.variant=n.getAttribute('mathvariant');
+      return [out];
+    };
+    const family=getComputedStyle(node).fontFamily.toLowerCase(),font=/mono/.test(family)?'mono':/sans|arial|helvetica|inter/.test(family)?'sans':'serif';
+    return {version:1,font,children:[...node.childNodes].flatMap(child=>read(child))};
   }
   const modelName=text=>text.match(/(?:Claude\s+)?(?:Opus|Sonnet|Haiku|Fable)\s+\d+(?:\.\d+)*(?:\s+(?:Thinking|Extended))?/i)?.[0]?.trim()||'';
   const same=(a,b)=>a.replace(/^Claude\s+/i,'').toLowerCase()===b.replace(/^Claude\s+/i,'').toLowerCase();
@@ -153,7 +173,7 @@
   function snapshot(){
     const root=document.querySelector('main')||document;
     const nodes=all('[data-testid="user-message"],[data-message-author-role="user"],.font-claude-response,[data-testid="assistant-message"]',root).filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="user-message"],[data-message-author-role="user"],.font-claude-response,[data-testid="assistant-message"]'));
-    const messages=nodes.map(n=>({role:n.matches('.font-claude-response,[data-testid="assistant-message"]')?'assistant':'user',text:messageText(n),files:[]}));
+    const messages=nodes.map(n=>({role:n.matches('.font-claude-response,[data-testid="assistant-message"]')?'assistant':'user',text:messageText(n),format:messageFormat(n),files:[]}));
     const rawTitle=document.title.replace(/\s*[-|—]\s*Claude.*$/i,'').trim();
     const header=document.querySelector('[data-testid="session-title-split"] h2,[data-testid="chat-header"] h2');
     const title=(header&&visible(header)?label(header):'')||(/^claude(?:\.ai)?$/i.test(rawTitle)?'':rawTitle);
@@ -300,7 +320,7 @@
     const describe=node=>({tag:node.tagName,testId:node.getAttribute('data-testid'),role:node.getAttribute('role'),label:(node.getAttribute('aria-label')||node.getAttribute('title')||node.getAttribute('alt')||'').slice(0,160),parents:[...function*(n){for(let i=0;n&&i<5;i++,n=n.parentElement)yield n.tagName+(n.getAttribute('data-testid')?'[data-testid='+n.getAttribute('data-testid')+']':'')+(n.getAttribute('role')?'[role='+n.getAttribute('role')+']':'');}(node.parentElement)]});
     const root=responses().at(-1),scope=root?assistantFileScope(root):null;
     const imageInfo=img=>({...describe(img),inLastTurn:!!scope?.contains(img),width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,complete:img.complete,source:address(img.currentSrc||img.src)});
-    return {version:16,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
+    return {version:17,readyState:document.readyState,visibility:document.visibilityState,sendControls:all('button,[role="button"],input[type="submit"]').filter(isSendButton).slice(0,12).map(n=>({...describe(n),visible:visible(n),active:activeControl(n),enabled:sendEnabled(n),inert:!!n.closest('[inert]'),ariaHidden:!!n.closest('[aria-hidden="true"]')})),path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
   }
   const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
   function pdfCards(root){
@@ -452,11 +472,36 @@
     if(artifact&&openArtifact&&!files.length)warnings.push('Не удалось добавить файл артефакта в этот чат. Его можно открыть и скачать на claude.ai.');
     return {files,warnings};
   }
+  async function observeAnswer(message,{before,responseURL=chatURL(),deadline=Date.now()+165000}){
+    let previous='',previousFormat='',unchangedSince=0,completedSince=0,seenStop=false;
+    while(Date.now()<deadline){
+      await delay(250);requireAvailable();
+      const actualURL=chatURL();if(responseURL&&actualURL!==responseURL)throw Error('Вкладка Claude переключилась во время ответа. Ответ другого разговора не переносился.');if(!responseURL&&actualURL)responseURL=actualURL;
+      const list=responses(),node=list.length>before?list.at(-1):null,text=node?messageText(node):'',format=node?messageFormat(node):null,signature=JSON.stringify(format);
+      const stopping=node?.getAttribute('data-is-streaming')==='true'||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)));
+      if(stopping)seenStop=true;
+      if(text&&(text!==previous||signature!==previousFormat)){previous=text;previousFormat=signature;unchangedSince=Date.now();await chrome.runtime.sendMessage({type:'update',id:message.id,text,format,url:chatURL()});}
+      const explicitlyDone=node?.getAttribute('data-is-streaming')==='false';
+      if(explicitlyDone&&!stopping){if(!completedSince)completedSince=Date.now();}else completedSince=0;
+      const settleMs=explicitlyDone?500:seenStop?1000:10000;
+      if(text&&!stopping&&Date.now()-unchangedSince>=settleMs&&(!explicitlyDone||Date.now()-completedSince>=settleMs)){
+        const {files,warnings}=await collectFiles({openArtifact:true});
+        for(const file of files){if(file.id)continue;const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
+        for(const warning of warnings)await chrome.runtime.sendMessage({type:'warning',id:message.id,warning});
+        const state=snapshot();return {url:state.url,title:state.title,state:state.state};
+      }
+    }
+    throw Error('Время ожидания истекло. Проверьте чат на Mac перед повторной отправкой.');
+  }
+  function pageHealth(){
+    const problem=all('[role="alert"],main h1,main h2,main button').filter(n=>visible(n)&&outsideTranscript(n)).some(n=>/application error|something went wrong|reload (?:the )?page|refresh (?:the )?page|перезагрузите страницу|обновите страницу|произошла ошибка при загрузке/i.test(label(n)));
+    return {ready:document.readyState==='complete',version:17,needsReload:problem&&!editor(),hasDraft:!!editor()?.innerText.trim()||hasComposerAttachments(composerRoot())};
+  }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:16});return;}
+    if(message.type==='ready'){respond(pageHealth());return;}
     if(message.type!=='run')return;
-    if(message.kind==='current'){const url=chatURL(),isNew=['/','/new'].includes(location.pathname);if(!url&&!isNew){respond({done:true,result:{current:false}});return;}const result={current:true,url,isNew,state:readState()};if(message.includeSnapshot===true||url!==message.knownURL)result.snapshot=snapshot();respond({done:true,result});return;}
+    if(message.kind==='current'){const url=chatURL(),isNew=['/','/new'].includes(location.pathname);if(!url&&!isNew){respond({done:true,result:{current:false}});return;}const result={current:true,url,isNew,pageInstance,state:readState()};if(message.includeSnapshot===true||url!==message.knownURL||message.knownPage!==pageInstance)result.snapshot=snapshot();respond({done:true,result});return;}
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(message.kind==='diagnostics'){respond({done:true,result:fileDiagnostics()});return;}
     if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;activeJobId=message.id;
@@ -476,6 +521,15 @@
           if(conversationUnavailable()){respond({done:true,result:{unavailable:true,url:message.url}});return;}
           const state=snapshot(),generated=await collectFiles({openArtifact:message.collectArtifacts===true});const last=state.messages.findLast(m=>m.role==='assistant');if(last)last.files=generated.files;
           respond({done:true,result:{snapshot:state,catalog:await inspectCatalog(),warnings:generated.warnings}});return;
+        }
+        if(message.kind==='resume'){
+          submissionAttempted=true;const checkpoint=message.checkpoint;
+          if(!checkpoint||checkpoint.url&&checkpoint.url!==chatURL())throw Error('После перезагрузки открыт другой разговор. Повторной отправки не было.');
+          await waitFor(()=>{
+            const users=userMessages();const target=users[checkpoint.users];
+            return users.length===checkpoint.users+1&&target&&normalized(messageText(target))===normalized(checkpoint.text)&&(!checkpoint.previousUser||normalized(messageText(users[checkpoint.users-1]))===checkpoint.previousUser);
+          },12000).catch(()=>{throw Error('После перезагрузки не удалось подтвердить отправленное сообщение. Проверьте Claude; повторной отправки не было.');});
+          respond({done:true,result:await observeAnswer(message,{before:checkpoint.answers,responseURL:chatURL()})});return;
         }
         if(message.kind!=='chat')throw Error('Неизвестная команда расширения. Обновите ClaudeRU и вкладку Claude.');
         const requireConversation=()=>{if(Object.hasOwn(message,'url')&&(message.url||null)!==chatURL())throw Error('Вкладка Claude переключилась на другой разговор. Сообщение не отправлено.');};
@@ -515,30 +569,15 @@
         // One click only. A failed acknowledgement must never trigger a blind resend.
         requireConversation();
         if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');
+        const checkpoint={url:chatURL(),users:userMessages().length,answers:before,text,previousUser:normalized(messageText(userMessages().at(-1)||document.createElement('div')))};
+        const saved=await chrome.runtime.sendMessage({type:'checkpoint',id:message.id,checkpoint});if(!saved?.ok)throw Error('Не удалось подготовить восстановление связи. Сообщение не отправлено.');
+        requireConversation();if(!sendEnabled(send)||send!==findSend()||normalized(editor()?.innerText)!==normalized(text))throw Error('Поле Claude изменилось перед отправкой. Черновик сохранён.');
         ownedDraft=null;submissionAttempted=true;send.click();
         try{
           await waitFor(()=>{requireAvailable();return userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before;},10000);
         }catch(e){if(e.state){e.notSent=!userMessages().some(n=>!beforeUsers.has(turnKey(n)));throw e;}throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}
-        let previous='',unchangedSince=0,completedSince=0,seenStop=false,responseURL=chatURL();
-        const deadline=Date.now()+165000;
-        while(Date.now()<deadline){
-          await delay(250);requireAvailable();
-          const actualURL=chatURL();if(responseURL&&actualURL!==responseURL)throw Error('Вкладка Claude переключилась во время ответа. Ответ другого разговора не переносился.');if(!responseURL&&actualURL)responseURL=actualURL;
-          const list=responses(),text=list.length>before?messageText(list.at(-1)):'';
-          const stopping=list.at(-1)?.getAttribute('data-is-streaming')==='true'||all('button').some(b=>visible(b)&&/stop response|stop generating|остановить/i.test(label(b)));
-          if(stopping)seenStop=true;
-          if(text&&text!==previous){previous=text;unchangedSince=Date.now();await chrome.runtime.sendMessage({type:'update',id:message.id,text,url:chatURL()});}
-          const explicitlyDone=list.at(-1)?.getAttribute('data-is-streaming')==='false';
-          if(explicitlyDone&&!stopping){if(!completedSince)completedSince=Date.now();}else completedSince=0;
-          const settleMs=explicitlyDone?500:seenStop?1000:10000;
-          if(text&&!stopping&&Date.now()-unchangedSince>=settleMs&&(!explicitlyDone||Date.now()-completedSince>=settleMs)){
-            const {files,warnings}=await collectFiles({openArtifact:true});
-            for(const file of files){if(file.id)continue;const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
-            for(const warning of warnings)await chrome.runtime.sendMessage({type:'warning',id:message.id,warning});
-            const state=snapshot();respond({done:true,result:{url:state.url,title:state.title,state:state.state}});return;
-          }
-        }
-        throw Error('Время ожидания истекло. Проверьте чат на Mac перед повторной отправкой.');
+        await chrome.runtime.sendMessage({type:'accepted',id:message.id,url:chatURL()});
+        respond({done:true,result:await observeAnswer(message,{before})});return;
       }catch(e){respond({error:e.message,notSent:e.notSent===true||!submissionAttempted,state:e.state});}finally{busy=false;activeJobId=null;}
     })();return true;
   });

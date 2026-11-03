@@ -18,11 +18,11 @@ test('background carries full job and file events between selected tab and authe
   const chrome={
     storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},
     tabs:{get:async()=>({url:job.url,status:'complete'}),update:async(...args)=>navigation.push(args),sendMessage:async(tabId,message)=>{
-      assert.equal(tabId,7);if(message.type==='ready')return {ready:true,version:16};jobs.push(message);
+      assert.equal(tabId,7);if(message.type==='ready')return {ready:true,version:17};jobs.push(message);
       await new Promise(resolve=>handler({type:'file',id:job.id,file:{name:'output.txt',data:'aGk='}},{tab:{id:7}},ack=>{assert.equal(ack.ok,true);resolve();}));
       return {done:true,result:{url:job.url,title:'Done'}};
     }},
-    alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}},getURL:p=>'chrome-extension://test/'+p}
+    alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}},getURL:p=>'chrome-extension://test/'+p}
   };
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});
   await completion;
@@ -32,8 +32,8 @@ test('background carries full job and file events between selected tab and authe
 test('background checks stale page readiness before requesting or running a job',async()=>{
   const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
   let config={token:'a'.repeat(64),tabId:7},completed;const done=new Promise(r=>completed=r),messages=[];
-  const chrome={storage:{local:{get:async()=>config,set:async data=>{assert.match(data.lastStatus,/Обновите вкладку/);config={};completed();},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/new'}),sendMessage:async(id,message)=>{messages.push(message.type);return{ready:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
-  const fetch=async(url,options)=>{assert.ok(url.endsWith('/poll'));assert.equal(options.headers['X-ClaudeRU-Protocol'],'16');assert.notEqual(options.headers['X-ClaudeRU-Page-Protocol'],'16');return{ok:false,status:426,json:async()=>({error:'Обновите вкладку Claude'})};};
+  const chrome={storage:{local:{get:async()=>config,set:async data=>{assert.match(data.lastStatus,/Обновите вкладку/);config={};completed();},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/new'}),sendMessage:async(id,message)=>{messages.push(message.type);return{ready:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+  const fetch=async(url,options)=>{assert.ok(url.endsWith('/poll'));assert.equal(options.headers['X-ClaudeRU-Protocol'],'17');assert.notEqual(options.headers['X-ClaudeRU-Page-Protocol'],'17');return{ok:false,status:426,json:async()=>({error:'Обновите вкладку Claude'})};};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.deepEqual(messages,['ready']);
 });
 test('existing new-chat pages are reused and navigation happens only when changing conversations',async()=>{
@@ -53,7 +53,7 @@ test('existing new-chat pages are reused and navigation happens only when changi
     const job={id:'test-job',kind:scenario.kind,text:'hello',url:scenario.url};
     const respond=data=>({ok:true,status:200,json:async()=>data});
     const fetch=async(url,options)=>{if(url.endsWith('/poll')){if(pollCount++===0)return respond(job);return new Promise(r=>releasePoll=()=>r(respond({idle:true})));}const event=JSON.parse(options.body);assert.equal(event.type,scenario.error?'error':'done',event.error);config={};releasePoll?.();completed();return respond({ok:true});};
-    const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:current,status:'complete'}),update:async(id,{url})=>{navigation.push(url);current=url;},sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:16};runs.push(message);return{done:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+    const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:current,status:'complete'}),update:async(id,{url})=>{navigation.push(url);current=url;},sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:17};runs.push(message);return{done:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
     vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;
     assert.equal(navigation.length,scenario.navigate?1:0,JSON.stringify(scenario));assert.equal(runs.length,scenario.error?0:1);
   }
@@ -62,7 +62,7 @@ test('extension rejection before submission preserves the notSent flag through b
   const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');let config={token:'a'.repeat(64),tabId:7},pollCount=0,release,complete;
   const done=new Promise(r=>complete=r),events=[];const reply=data=>({ok:true,status:200,json:async()=>data});
   const fetch=async(url,options)=>{if(url.endsWith('/poll')){if(!pollCount++)return reply({id:'job',kind:'chat',url:'https://claude.ai/chat/test',text:'file'});return new Promise(r=>release=()=>r(reply({idle:true})));}events.push(JSON.parse(options.body));config={};release?.();complete();return reply({ok:true});};
-  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/chat/test',status:'complete'}),sendMessage:async(id,message)=>message.type==='ready'?{ready:true,version:16}:{error:'Не удалось обработать файл',notSent:true}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/chat/test',status:'complete'}),sendMessage:async(id,message)=>message.type==='ready'?{ready:true,version:17}:{error:'Не удалось обработать файл',notSent:true}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.equal(events[0].type,'error');assert.equal(events[0].notSent,true);
 });
 
@@ -80,12 +80,12 @@ test('a second chat uses a separate native tab while the first is generating',as
     if(event.id==='a'&&event.type==='done'){config={};releasePoll?.();complete();}return reply({ok:true});
   };
   const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async id=>tabs.get(id),create:async options=>{created.push(options);const tab={id:8,url:options.url,status:'complete'};tabs.set(8,tab);return tab;},update:async()=>assert.fail('the running conversation must not be navigated'),sendMessage:async(id,message)=>{
-    if(message.type==='ready')return{ready:true,version:16};runs.push([id,message.id]);
+    if(message.type==='ready')return{ready:true,version:17};runs.push([id,message.id]);
     if(message.id==='a')await firstWaiting;
     // A spoofed update from the other tab must not be forwarded.
     assert.equal(handler({id:message.id,type:'update',text:'wrong'},{tab:{id:id===7?8:7}},()=>assert.fail()),undefined);
     await new Promise(r=>handler({id:message.id,type:'update',text:message.id},{tab:{id}},ack=>{assert.equal(ack.ok,true);r();}));return {done:true,result:{title:message.id}};
-  }},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}}}};
+  }},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;
   assert.equal(created.length,1);assert.equal(created[0].active,false);assert.deepEqual(runs,[[7,'a'],[8,'b']]);assert.deepEqual(events.filter(e=>e.type==='update').map(e=>e.text),['b','a']);
 });
@@ -104,8 +104,8 @@ test('a newly created tab with no URL or about:blank waits for Claude before dis
     const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{
       get:async id=>id===7?{url:jobs[0].url,status:'complete'}:++reads<3?{id:8,url:initialURL,pendingUrl:jobs[1].url,status:initialStatus}:{id:8,url:jobs[1].url,status:'complete'},
       create:async()=>({id:8,url:initialURL,status:initialStatus}),update:async()=>assert.fail('a new tab already loading the target must not be navigated again'),
-      sendMessage:async(id,message)=>{if(id===8)assert.ok(reads>=3,'commands must wait for the committed Claude URL');if(message.type==='ready')return {ready:true,version:16};runs.push(message.id);if(message.id==='first')await firstWaiting;return{done:true,result:{applied:true}};}
-    },alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+      sendMessage:async(id,message)=>{if(id===8)assert.ok(reads>=3,'commands must wait for the committed Claude URL');if(message.type==='ready')return {ready:true,version:17};runs.push(message.id);if(message.id==='first')await firstWaiting;return{done:true,result:{applied:true}};}
+    },alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
     vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;
     assert.equal(events.some(e=>e.type==='error'),false,JSON.stringify(events));assert.deepEqual(runs,['first','delete']);assert.ok(reads>=3);
   }
@@ -121,7 +121,7 @@ test('opening and deleting another chat reuse an idle tab instead of creating mo
     if(url.endsWith('/poll')){await previous;if(poll<jobs.length){const job=jobs[poll++];previous=new Promise(r=>allowNext=r);return reply(job);}return new Promise(r=>waitingPoll=()=>r(reply({idle:true})));}
     const event=JSON.parse(options.body);events.push(event);if(event.id==='delete'){config={};waitingPoll?.();finish();}allowNext?.();return reply({ok:true});
   };
-  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:current,status:'complete'}),create:async()=>{throw Error('Unexpected extra tab');},update:async(id,{url})=>{assert.equal(id,7);navigation.push(url);current=url;},sendMessage:async(id,message)=>{assert.equal(id,7);if(message.type==='ready')return{ready:true,version:16};runs.push(message.id);return{done:true,result:{applied:true}};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:current,status:'complete'}),create:async()=>{throw Error('Unexpected extra tab');},update:async(id,{url})=>{assert.equal(id,7);navigation.push(url);current=url;},sendMessage:async(id,message)=>{assert.equal(id,7);if(message.type==='ready')return{ready:true,version:17};runs.push(message.id);return{done:true,result:{applied:true}};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;
   assert.equal(events.some(e=>e.type==='error'),false,JSON.stringify(events));assert.deepEqual(runs,['inspect','open','delete']);assert.deepEqual(navigation,[jobs[1].url,jobs[2].url]);
 });
@@ -131,13 +131,13 @@ test('short waits use the worker clock and accept only the active job and its ow
   const done=new Promise(r=>finish=r),events=[];const reply=data=>({ok:true,status:200,json:async()=>data});
   const fetch=async(url,options)=>{if(url.endsWith('/poll'))return !polls++?reply({id:'job',chatId:'a',kind:'chat',url:'https://claude.ai/chat/a'}):new Promise(r=>releasePoll=()=>r(reply({idle:true})));events.push(JSON.parse(options.body));config={};releasePoll?.();finish();return reply({ok:true});};
   const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:'https://claude.ai/chat/a',status:'complete'}),sendMessage:async(id,message)=>{
-    if(message.type==='ready')return{ready:true,version:16};
+    if(message.type==='ready')return{ready:true,version:17};
     for(const invalid of [{id:'stale',ms:20,tabId:7},{id:'job',ms:20,tabId:8},{id:'job',ms:-1,tabId:7},{id:'job',ms:1001,tabId:7},{id:'job',ms:'20',tabId:7}]){
       let result;const keep=handler({type:'wait',id:invalid.id,ms:invalid.ms},{tab:{id:invalid.tabId}},ack=>result=ack);assert.equal(keep,undefined);assert.equal(result.ok,false);
     }
     const start=performance.now();await new Promise(resolve=>{assert.equal(handler({type:'wait',id:'job',ms:30},{tab:{id:7}},ack=>{assert.equal(ack.ok,true);resolve();}),true);});
     assert.ok(performance.now()-start>=20,'the worker must honor the requested pause');assert.ok(performance.now()-start<1000,'the wait must not use a background page timer');return{done:true};
-  }},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}}}};
+  }},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout});await done;assert.deepEqual(events.map(e=>e.type),['done'],'clock messages must stay inside the extension');
 });
 
@@ -146,12 +146,45 @@ test('a chat management action never creates a new tab when the existing tab is 
   const firstWaiting=new Promise(r=>release=r),done=new Promise(r=>finish=r),events=[];
   const jobs=[{id:'first',kind:'chat',chatId:'a',url:'https://claude.ai/chat/a'},{id:'remove',kind:'manage',action:'delete',chatId:'b',url:'https://claude.ai/chat/b'}];const reply=data=>({ok:true,status:200,json:async()=>data});
   const fetch=async(url,options)=>{if(url.endsWith('/poll'))return poll<2?reply(jobs[poll++]):new Promise(r=>held=()=>r(reply({idle:true})));const event=JSON.parse(options.body);events.push(event);if(event.id==='remove')release();if(event.id==='first'){config={};held?.();finish();}return reply({ok:true});};
-  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:jobs[0].url,status:'complete'}),create:async()=>assert.fail('deletion must not open a tab'),update:async()=>assert.fail('the running chat must not be navigated'),sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:16};assert.equal(message.id,'first');await firstWaiting;return{done:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
+  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel:async()=>{}}},tabs:{get:async()=>({url:jobs[0].url,status:'complete'}),create:async()=>assert.fail('deletion must not open a tab'),update:async()=>assert.fail('the running chat must not be navigated'),sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:17};assert.equal(message.id,'first');await firstWaiting;return{done:true};}},alarms:{create(){},onAlarm:{addListener(){}}},runtime:{id:'test-extension',getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.equal(events.find(e=>e.id==='remove').type,'error');assert.match(events.find(e=>e.id==='remove').error,/вкладка Claude занята/);assert.equal(events.find(e=>e.id==='first').type,'done');
 });
 test('current conversation reads follow the most recently activated Claude tab without navigating it',async()=>{
   const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');let activated,config={token:'a'.repeat(64),tabId:7,followTabId:8},releasePoll,delivered=false,finished,started;const done=new Promise(r=>finished=r),polling=new Promise(r=>started=r),reads=[];let deliver;
   const reply=data=>({ok:true,status:200,json:async()=>data});const fetch=async(url,options)=>{if(url.endsWith('/poll')){if(!delivered){delivered=true;started();return new Promise(r=>deliver=()=>r(reply({id:'current-read',kind:'current',chatId:'native-current'})));}return new Promise(r=>releasePoll=()=>r(reply({idle:true})));}const event=JSON.parse(options.body);assert.equal(event.type,'done',event.error);assert.equal(event.result.url,'https://claude.ai/chat/activated');config={};releasePoll?.();finished();return reply({ok:true});};
-  const chrome={storage:{local:{get:async()=>config,set:async value=>Object.assign(config,value),setAccessLevel(){}}},tabs:{get:async id=>({url:id===9?'https://claude.ai/chat/activated':'https://claude.ai/chat/old',status:'complete'}),create:async()=>assert.fail('read must not create a tab'),update:async()=>assert.fail('read must not navigate'),onActivated:{addListener:fn=>activated=fn},sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:16};reads.push(id);return{done:true,result:{current:true,url:'https://claude.ai/chat/activated'}};}},runtime:{getManifest:()=>({version:'0.8.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}};
+  const chrome={storage:{local:{get:async()=>config,set:async value=>Object.assign(config,value),setAccessLevel(){}}},tabs:{get:async id=>({url:id===9?'https://claude.ai/chat/activated':'https://claude.ai/chat/old',status:'complete'}),create:async()=>assert.fail('read must not create a tab'),update:async()=>assert.fail('read must not navigate'),onActivated:{addListener:fn=>activated=fn},sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:17};reads.push(id);return{done:true,result:{current:true,url:'https://claude.ai/chat/activated'}};}},runtime:{getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}};
   vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout});await polling;activated({tabId:9});await new Promise(r=>setImmediate(r));deliver();await done;assert.deepEqual(reads,[9]);
+});
+
+test('a dropped chat channel resumes reading after reload without dispatching chat twice',async()=>{
+  const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
+  for(const scenario of ['discarded','manual']){
+    let handler,config={token:'a'.repeat(64),tabId:7},poll=0,held,finish,broken=false,reloads=0,clicks=0;const done=new Promise(r=>finish=r),runs=[],events=[];
+    const job={id:'recover',chatId:'a',kind:'chat',url:'https://claude.ai/chat/a',text:'Request'};const reply=data=>({ok:true,status:200,json:async()=>data});
+    const fetch=async(url,options)=>{if(url.endsWith('/poll'))return !poll++?reply(job):new Promise(r=>held=()=>r(reply({idle:true})));const event=JSON.parse(options.body);events.push(event);if(event.type==='done'||event.type==='error'){config={};held?.();finish();}return reply({ok:true});};
+    const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel(){}}},tabs:{get:async()=>({id:7,url:job.url,status:'complete',discarded:broken&&scenario==='discarded'}),reload:async()=>{reloads++;broken=false;},sendMessage:async(id,message)=>{
+      if(message.type==='ready'){if(broken&&scenario==='discarded')throw Error('page crashed');return{ready:true,version:17};}runs.push(message.kind);
+      if(message.kind==='chat'){
+        // Checkpoints from another tab cannot authorize recovery of this request.
+        let spoof;handler({type:'checkpoint',id:job.id,checkpoint:{users:9,answers:9,text:'Wrong'}},{tab:{id:8}},ack=>spoof=ack);assert.equal(spoof,undefined);
+        let ack;handler({type:'checkpoint',id:job.id,checkpoint:{url:job.url,users:0,answers:0,text:job.text,previousUser:''}},{tab:{id:7}},value=>ack=value);assert.equal(ack.ok,true);clicks++;broken=true;throw Error('message port closed');
+      }
+      assert.equal(message.kind,'resume');assert.equal(message.checkpoint.text,job.text);assert.equal(message.checkpoint.users,0);return{done:true,result:{url:job.url,title:'Recovered'}};
+    }},runtime:{getManifest:()=>({version:'0.9.0'}),onMessage:{addListener:fn=>handler=fn},onStartup:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}};
+    vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.deepEqual(runs,['chat','resume']);assert.equal(clicks,1);assert.equal(reloads,scenario==='discarded'?1:0);assert.equal(events.at(-1).type,'done',events.at(-1).error);assert.equal(events.at(-1).result.title,'Recovered');
+  }
+});
+
+test('a lost channel before the send checkpoint is not retried and keeps the wrapper draft',async()=>{
+  const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');let config={token:'a'.repeat(64),tabId:7},poll=0,held,finish,runs=0;const done=new Promise(r=>finish=r),events=[],reply=data=>({ok:true,status:200,json:async()=>data});
+  const fetch=async(url,options)=>{if(url.endsWith('/poll'))return !poll++?reply({id:'before-send',kind:'chat',url:'https://claude.ai/new'}):new Promise(r=>held=()=>r(reply({idle:true})));events.push(JSON.parse(options.body));config={};held?.();finish();return reply({ok:true});};
+  const chrome={storage:{local:{get:async()=>config,set:async()=>{},setAccessLevel(){}}},tabs:{get:async()=>({url:'https://claude.ai/new',status:'complete'}),reload:async()=>assert.fail('must not erase a draft before submission'),sendMessage:async(id,message)=>{if(message.type==='ready')return{ready:true,version:17};runs++;throw Error('channel closed');}},runtime:{getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}};
+  vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.equal(runs,1);assert.equal(events[0].type,'error');assert.equal(events[0].notSent,true);
+});
+
+test('idle discarded tabs are restored, protected from automatic discard, and repeated crashes are throttled',async()=>{
+  const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');let config={token:'a'.repeat(64),tabId:7},discarded=true,reloads=0,finish;const done=new Promise(r=>finish=r),updates=[],statuses=[];
+  const chrome={storage:{local:{get:async()=>config,set:async value=>{if(value.lastStatus){statuses.push(value.lastStatus);if(/снова не загрузился/.test(value.lastStatus)){config={};finish();}}},setAccessLevel(){}}},tabs:{get:async()=>({id:7,url:'https://claude.ai/chat/a',status:'complete',discarded,autoDiscardable:true}),update:async(id,value)=>updates.push([id,value]),reload:async()=>{reloads++;discarded=false;},sendMessage:async()=>{if(discarded)throw Error('discarded');return{ready:true,version:17};}},runtime:{getManifest:()=>({version:'0.9.0'}),onMessage:{addListener(){}},onStartup:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}};
+  const fetch=async(url)=>{assert.ok(url.endsWith('/poll'));discarded=true;return{ok:true,json:async()=>({idle:true})};};
+  vm.runInNewContext(source,{chrome,fetch,URL,AbortSignal,setTimeout:fn=>setImmediate(fn)});await done;assert.equal(reloads,1);assert.equal(updates.length,1);assert.equal(updates[0][1].autoDiscardable,false);assert.ok(statuses.some(s=>/Восстанавливаем/.test(s)));
 });

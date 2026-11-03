@@ -1,9 +1,10 @@
 import { MODEL_NAMES } from '/model-catalog.js';
+import { renderFormat } from '/message-format.js';
 const $=id=>document.getElementById(id);
 let chats=[],selected=null,operation=false,initializing=false,sending=new Set(),catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
 let statusRequestInFlight=false,stateRequestInFlight=false,contextChat=null,renameTarget=null,archiveView=false,pendingSelection=null;const remoteBusy=new Set();
 let historyRequestInFlight=false,historyRevision=-1;
-let currentRequestInFlight=false,viewEpoch=0,nativeLoading=false,pendingNativeOpen=null;
+let currentRequestInFlight=false,viewEpoch=0,nativeLoading=false,pendingNativeOpen=null,nativePageInstance=null;
 const busyHere=()=>sending.has(selected)||remoteBusy.has(selected);
 const messageNodes=new WeakMap();
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
@@ -35,6 +36,7 @@ function appendText(container,text){
   const parts=text.split(/(```[\s\S]*?```)/g);
   for(const part of parts){if(part.startsWith('```')&&part.endsWith('```')){const pre=document.createElement('pre'),code=document.createElement('code');code.textContent=part.slice(3,-3).replace(/^[^\n]*\n/,'');pre.append(code);container.append(pre);}else{const p=document.createElement('div');p.textContent=part;container.append(p);}}
 }
+function appendMessage(container,message){container.classList.remove('formatted');delete container.dataset.typography;if(!renderFormat(container,message.format))appendText(container,message.text||'');}
 function renderSidebar(){
   $('chats').replaceChildren();$('pinned-chats').replaceChildren();$('grouped-chats').replaceChildren();const groups=new Map();const search=$('search').value.trim().toLowerCase();
   const visible=chats.filter(c=>!!c.archived===archiveView&&(!search||c.title.toLowerCase().includes(search)));
@@ -50,13 +52,13 @@ function renderSidebar(){
 function renderMessages(){
   const messages=$('messages');$('workspace').classList.toggle('is-empty',!current()?.messages.length&&current()?.loaded!==false);$('prompt').placeholder=current()?.messages.length?'Ответить…':'Чем я могу вам помочь сегодня?';const nearBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<150;messages.replaceChildren();const chat=current();
   if(!chat?.messages.length){const intro=document.createElement('div');intro.className='welcome';intro.textContent=chat?.loaded===false?'Загружаем разговор…':'';messages.append(intro);}
-  for(const m of chat?.messages||[]){const article=document.createElement('article');article.className=m.role;messageNodes.set(m,article);if(m.role==='assistant'){const mark=svg('spark');mark.classList.add('claude-mark');article.append(mark);}const label=document.createElement('b');label.textContent=m.role==='user'?'Вы':'Claude';const text=document.createElement('div');text.className='message-text';appendText(text,m.text||'');article.append(label,text);if(!m.text&&m.role==='assistant'&&!m.error){const wait=document.createElement('span');wait.className='typing';wait.textContent='Думает…';article.append(wait);}for(const file of m.files||[])article.append(fileCard(file));if(m.error){const error=document.createElement('p');error.className='message-error';error.textContent=m.error;article.append(error);}messages.append(article);}
+  for(const m of chat?.messages||[]){const article=document.createElement('article');article.className=m.role;messageNodes.set(m,article);if(m.role==='assistant'){const mark=svg('spark');mark.classList.add('claude-mark');article.append(mark);}const label=document.createElement('b');label.textContent=m.role==='user'?'Вы':'Claude';const text=document.createElement('div');text.className='message-text';appendMessage(text,m);article.append(label,text);if(!m.text&&m.role==='assistant'&&!m.error){const wait=document.createElement('span');wait.className='typing';wait.textContent='Думает…';article.append(wait);}for(const file of m.files||[])article.append(fileCard(file));if(m.error){const error=document.createElement('p');error.className='message-error';error.textContent=m.error;article.append(error);}messages.append(article);}
   if(nearBottom)messages.scrollTop=messages.scrollHeight;
 }
 function updateStreamingMessage(answer,event){
   const article=messageNodes.get(answer);if(!article?.isConnected){renderMessages();return;}
   const messages=$('messages'),atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<150;
-  if(event.type==='update'){const text=article.querySelector('.message-text');text.replaceChildren();appendText(text,answer.text);article.querySelector('.typing')?.remove();}
+  if(event.type==='update'){const text=article.querySelector('.message-text');text.replaceChildren();appendMessage(text,answer);article.querySelector('.typing')?.remove();}
   if(event.type==='file')article.append(fileCard(event.file));
   if(atBottom)messages.scrollTop=messages.scrollHeight;
 }
@@ -164,7 +166,7 @@ $('chat-form').onsubmit=async e=>{
       while((end=buffer.indexOf('\n'))>=0){const event=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);
         if(event.type==='error'){if(event.state){chat.claudeState=event.state;chat.settings={model:event.state.model,effort:event.state.effort};}const error=Error(event.error);error.notSent=event.notSent===true;throw error;}
         if(event.type==='warning')warnings.push(event.warning);
-        if(event.type==='update'){answer.text=event.text;if(event.url)chat.url=event.url;}
+        if(event.type==='update'){answer.text=event.text;answer.format=event.format;if(event.url)chat.url=event.url;}
         if(event.type==='file')answer.files.push(event.file);
         if(event.type==='done'){done=true;if(event.chat)upsert(event.chat);}
         if(selected===chat.id){if(event.type==='done')renderMessages();else if(event.type==='update'||event.type==='file')updateStreamingMessage(answer,event);$('chat-title').textContent=current().title;}if(event.type==='done')renderSidebar();
@@ -231,13 +233,14 @@ async function refreshCurrent({initial=false}={}){
   if(currentRequestInFlight||operation||initializing&&!initial||!initial&&document.querySelector('dialog[open]'))return false;currentRequestInFlight=true;
   const epoch=viewEpoch;
   try{
-    const data=await api('/api/current',{id:selected,knownURL:current()?.url,includeSnapshot:initial||pendingNativeOpen===selected});
+    const data=await api('/api/current',{id:selected,knownURL:current()?.url,knownPage:nativePageInstance,includeSnapshot:initial||pendingNativeOpen===selected||current()?.claudeState?.streaming===true});
     if(operation||epoch!==viewEpoch)return false;if(data.loading){nativeLoading=true;updateControls();return true;}nativeLoading=false;if(!data.supported||!data.chat||data.chat.deleted){updateControls();return false;}
+    const pageChanged=!!data.pageInstance&&nativePageInstance!==data.pageInstance;if(data.pageInstance)nativePageInstance=data.pageInstance;
     const changed=selected!==data.chat.id;const local=chats.find(c=>c.id===data.chat.id);const beforeOptions=JSON.stringify([current()?.settings,current()?.claudeState,catalog]),beforeMessages=JSON.stringify(local?.messages);
     upsert(sending.has(data.chat.id)&&local?local:data.chat);if(data.catalog){catalog=data.catalog;catalogError=data.catalog.warning||'';}
     if(Number.isInteger(data.historyRevision))historyRevision=Math.max(historyRevision,data.historyRevision);
     if(changed){selected=data.chat.id;pendingNativeOpen=null;viewEpoch++;localStorage.setItem('clauderu-selected',selected);closePopovers();status('');}
-    if(changed||initial)render();else{if(beforeMessages!==JSON.stringify(current()?.messages)&&!sending.has(selected))renderMessages();if(beforeOptions!==JSON.stringify([current()?.settings,current()?.claudeState,catalog]))renderOptions();else updateControls();}if((changed||initial||pendingNativeOpen===selected)&&!busyHere()&&!data.chat.claudeState?.streaming)await refreshSelected(selected,{followNative:true});
+    if(changed||initial)render();else{if(beforeMessages!==JSON.stringify(current()?.messages)&&!sending.has(selected))renderMessages();if(beforeOptions!==JSON.stringify([current()?.settings,current()?.claudeState,catalog]))renderOptions();else updateControls();}if(pageChanged)pendingNativeOpen=selected;if((changed||initial||pendingNativeOpen===selected)&&!busyHere()&&!data.chat.claudeState?.streaming)await refreshSelected(selected,{followNative:true});
     return true;
   }catch{return false;}finally{currentRequestInFlight=false;}
 }

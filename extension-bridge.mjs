@@ -27,15 +27,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='16'||req.headers['x-clauderu-page-protocol']!=='16'){
+        if(req.headers['x-clauderu-protocol']!=='17'||req.headers['x-clauderu-page-protocol']!=='17'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='16'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.8.0 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='17'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.9.0 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:16});
+          return json(426,{error:this.compatibilityError,requiredProtocol:17});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:16});
+        if(req.url==='/health')return json(200,{ok:true,protocol:17});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -66,7 +66,7 @@ export class ExtensionBridge {
           if (!job || event.id !== job.id) return json(409,{error:'Задание уже завершено'});
           if (event.type === 'update') {
             if(typeof event.text!=='string') return json(400,{error:'Invalid text'});
-            job.onUpdate?.({text:event.text,url:event.url ? conversationURL(event.url) : null});
+            job.onUpdate?.({text:event.text,...(event.format?{format:event.format}:{}),url:event.url ? conversationURL(event.url) : null});
           } else if (event.type === 'file') {
             if(!job.onFile)return json(400,{error:'Files not accepted'});
             await job.onFile(event.file);

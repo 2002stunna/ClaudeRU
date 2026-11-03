@@ -25,7 +25,7 @@ async function app(t){
   const state={settings:null,files:null,title:'Старый чат'};
   const bridge={status:{connected:true},
     execute:async job=>job.kind==='manage'?(state.title=job.title||state.title,{applied:true}):job.kind==='open'?{snapshot:{url:job.url,title:state.title,messages:[{role:'user',text:'Старый вопрос'},{role:'assistant',text:'Старый ответ'}]}}:{catalog:mockCatalog({models:['Sonnet 5.5'],efforts:['low','high'],current:{model:'Sonnet 5.5',effort:'high'}}),chats:[{url:'https://claude.ai/chat/remote-123',title:'Старый чат'}]},
-    send:async job=>{if(job.text==='Отклонить до отправки'){const error=Error('Ошибка обработки вложения');error.notSent=true;throw error;}state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',url:'https://claude.ai/chat/new-456'});await job.onFile({name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')});return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
+    send:async job=>{if(job.text==='Отклонить до отправки'){const error=Error('Ошибка обработки вложения');error.notSent=true;throw error;}state.settings=job.settings;state.files=job.files;job.onUpdate({text:'Ответ с файлом',format:{version:1,font:'sans',children:[{tag:'p',children:['Ответ с ',{tag:'strong',children:['файлом']}]}]},url:'https://claude.ai/chat/new-456'});const file={name:'ответ.csv',type:'text/csv',data:Buffer.from('a,b\n1,2').toString('base64')};const first=await job.onFile(file),recovered=await job.onFile(file);assert.equal(first.id,recovered.id);return {url:'https://claude.ai/chat/new-456',title:'Разговор с файлом'};}};
   const auth={salt:'test',hash:scryptSync('test-password','test',64).toString('hex')};
   const server=createApp({auth,bridge});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const base=`http://127.0.0.1:${server.address().port}`;let cookie='';
@@ -48,10 +48,10 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
   const response=await post('/api/chat',{chatId:chat.id,text:'Изучи',settings,fileIds:[file.id]});
   const events=(await response.text()).trim().split('\n').map(JSON.parse);
   assert.deepEqual(state.settings,settings);assert.equal(state.files[0].data,data);
-  const generated=events.find(e=>e.type==='file').file;assert.equal(await(await get('/api/files/'+generated.id)).text(),'a,b\n1,2');
+  assert.equal(events.filter(e=>e.type==='file').length,1,'recovery must not duplicate a generated file');const generated=events.find(e=>e.type==='file').file;assert.equal(await(await get('/api/files/'+generated.id)).text(),'a,b\n1,2');
   assert.equal(events.at(-1).type,'done');
   const history=await(await get('/api/chats')).json();const stored=history.chats.find(c=>c.id===chat.id);
-  assert.equal(stored.title,'Разговор с файлом');assert.equal(stored.messages[0].files[0].id,file.id);assert.equal(stored.messages[1].files[0].id,generated.id);
+  assert.equal(stored.messages[1].format.children[0].children[1].tag,'strong');assert.equal(stored.title,'Разговор с файлом');assert.equal(stored.messages[0].files[0].id,file.id);assert.equal(stored.messages[1].files[0].id,generated.id);
   assert.equal((await post('/api/chat',{chatId:chat.id,text:'bad',settings:{effort:'invalid'}})).status,400);
   const renamed=await(await post('/api/chats/metadata',{id:chat.id,title:'Своё название',pinned:true})).json();assert.equal(renamed.chat.pinned,true);
   const refreshed=await(await post('/api/chats/open',{id:chat.id})).json();assert.equal(refreshed.chat.title,'Своё название');

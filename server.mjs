@@ -1,17 +1,18 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ClaudeBridge, conversationURL } from './bridge.mjs';
 import { ExtensionBridge } from './extension-bridge.mjs';
 import { MODEL_NAMES, isModelCacheComplete, catalogFor } from './model-catalog.mjs';
 import { DataStore, chatOptions, MAX_FILES, MAX_TOTAL } from './data-store.mjs';
+import { normalizeFormat } from './public/message-format.js';
 
 export function createApp({ auth, bridge, secure = false, store = new DataStore() }) {
   bridge.onDeleted=records=>store.remoteDeletions(records);
   const sessions = new Map();let failures = [];const active=new Map();
   let catalogInitialization=null,catalogWarning='';
-  const assets = {'/model-catalog.js':['../model-catalog.mjs','text/javascript; charset=utf-8'], '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
+  const assets = {'/message-format.js':['message-format.js','text/javascript; charset=utf-8'], '/model-catalog.js':['../model-catalog.mjs','text/javascript; charset=utf-8'], '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'], '/style.css':['style.css','text/css; charset=utf-8']};
   async function ensureModelCatalog(){
     await store.ready;if(!bridge.execute||isModelCacheComplete(store.modelCatalog))return;
     if(!catalogInitialization){
@@ -40,7 +41,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         for(const file of (Array.isArray(message.files)?message.files:[]).slice(0,MAX_FILES))files.push(file.id?(await store.readFile(file.id)).meta:await store.putFile(file));
         const prior=chat.messages.find(m=>m.role===message.role&&m.text===message.text);
         if(!files.length&&prior?.files?.length)files.push(...prior.files);
-        messages.push({role:message.role,text:message.text.slice(0,500000),files});
+        messages.push({role:message.role,text:message.text.slice(0,500000),format:normalizeFormat(message.format),files});
       }
       if(messages.length)chat.messages=messages;
     }
@@ -152,14 +153,14 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         try{
           if(!bridge.execute)return json(200,{supported:false});
           const selected=(await store.list()).find(c=>c.id===body.id),selectedChatId=selected&&(selected.url||null)===(body.knownURL||null)?selected.id:undefined;
-          const result=await bridge.execute({kind:'current',chatId:'native-current',selectedChatId,knownURL:body.knownURL,includeSnapshot:body.includeSnapshot===true});
+          const result=await bridge.execute({kind:'current',chatId:'native-current',selectedChatId,knownURL:body.knownURL,knownPage:typeof body.knownPage==='string'?body.knownPage.slice(0,100):undefined,includeSnapshot:body.includeSnapshot===true});
           if(result?.current!==true)return json(200,{supported:false,loading:result?.loading===true});
           const url=result.url?conversationURL(result.url):null;let chat;
           if(url){chat=await store.create({url,title:result.snapshot?.title||result.title||'Без названия'});if(chat.deleted&&chat.deletionSource==='local'&&result.snapshot?.messages?.length)await store.restoreLocal(chat);if(chat.deleted)return json(200,{supported:true,hidden:true,url});}
           else if(result.isNew){const list=await store.list(),matches=c=>!c.url&&(!c.messages.length||active.get(c.id)==='chat');chat=list.find(c=>c.id===result.boundChatId&&matches(c))||list.find(c=>c.id===body.id&&matches(c))||list.find(c=>!c.url&&!c.messages.length)||await store.create({title:'Новая сессия'});}
           else return json(200,{supported:false});
           if(!active.has(chat.id)){if(result.snapshot)await applySnapshot(chat,result.snapshot);else if(result.state){const before=JSON.stringify(chat.claudeState);applyState(chat,result.state);if(before!==JSON.stringify(chat.claudeState))await store.save(chat);}}
-          return json(200,{supported:true,chat,url,isNew:result.isNew===true,catalog:catalogFor(store.modelCatalog,result.state||chat.settings),historyRevision:store.deletionRevision});
+          return json(200,{supported:true,chat,url,pageInstance:result.pageInstance,isNew:result.isNew===true,catalog:catalogFor(store.modelCatalog,result.state||chat.settings),historyRevision:store.deletionRevision});
         }catch(e){return json(400,{error:e.message});}
       }
       if(req.url==='/api/sync'||req.url==='/api/chats/open'){
@@ -204,11 +205,11 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);chat.loaded=true;
         try{await store.save(chat);}catch{active.delete(chat.id);return json(500,{error:'Не удалось сохранить историю на Mac'});}
         res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','X-Accel-Buffering':'no'});
-        const write=data=>{if(!res.destroyed)res.write(JSON.stringify(data)+'\n');};let generatedSize=0;
+        const write=data=>{if(!res.destroyed)res.write(JSON.stringify(data)+'\n');};let generatedSize=0;const generatedFiles=new Map();
         try{
           const result=await bridge.send({chatId:chat.id,text:body.text,url:chat.url,settings,files,catalogCache:store.modelCatalog,
-            onUpdate:data=>{answer.text=data.text;if(data.url)chat.url=conversationURL(data.url);write({type:'update',...data});},
-            onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});return meta;},
+            onUpdate:data=>{answer.text=data.text;answer.format=normalizeFormat(data.format);if(data.url)chat.url=conversationURL(data.url);write({type:'update',text:answer.text,format:answer.format,url:data.url});},
+            onFile:async file=>{const digest=createHash('sha256').update(JSON.stringify([file?.name,file?.type,file?.data])).digest('hex');if(generatedFiles.has(digest))return generatedFiles.get(digest);if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedFiles.set(digest,meta);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});return meta;},
             onWarning:warning=>write({type:'warning',warning})});
           if(result?.url)chat.url=conversationURL(result.url);
           applyState(chat,result?.state);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClaudeRU — домашний мост",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Связывает выбранную вкладку Claude с вашим домашним сервером ClaudeRU.",
   "permissions": [
     "storage",
