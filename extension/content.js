@@ -1,6 +1,6 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
-  let busy=false, modelCache={}, managedCache=false, activeJobId=null;
+  let busy=false, modelCache={}, managedCache=false, activeJobId=null, ownedDraft=null;
   const MODELS=['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5'];
   // Timers in a hidden Claude tab can be throttled for seconds. The extension's
   // worker owns short waits; readiness is still checked in the actual page.
@@ -9,7 +9,7 @@
   const label=node=>{const text=(node?.innerText||node?.textContent||'').replace(/[\uE000-\uF8FF]/g,'').trim();return text||node?.getAttribute('aria-label')||'';};
   const visible=node=>!!node && node.getClientRects().length>0 && getComputedStyle(node).visibility!=='hidden';
   const activeControl=node=>visible(node)&&!node.closest('[inert],[aria-hidden="true"]');
-  const editor=()=>all('[data-testid="chat-input"][contenteditable="true"],[contenteditable="true"][role="textbox"], div.ProseMirror[contenteditable="true"]').find(activeControl);
+  const editor=()=>all('[data-testid="chat-input"][contenteditable="true"]').find(activeControl)||all('[contenteditable="true"][role="textbox"],div.ProseMirror[contenteditable="true"]').find(activeControl);
   const responses=()=>{const nodes=all('[data-testid="assistant-message"],.font-claude-response');return nodes.filter(n=>visible(n)&&!n.parentElement?.closest('[data-testid="assistant-message"],.font-claude-response'));};
   function messageText(node){
     const cards=new Set(pdfCards(node).map(c=>c.container));
@@ -208,7 +208,15 @@
     const current=normalized(input.innerText);if(current&&current!==normalized(text))throw Error('Текст во вкладке Claude изменился. Отправка остановлена, чтобы сохранить черновик.');
     if(current)return true;
     input.focus();if(!document.execCommand('insertText',false,text))throw Error('Не удалось вставить текст в поле Claude.');
-    input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:text}));return true;
+    input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:text}));ownedDraft={text:normalized(text),url:location.href};return true;
+  }
+  function replaceOwnedDraft(input,text){
+    // Replace only our unsubmitted text. A manual edit or attachment keeps the
+    // native draft protected. The wrapper retains failed drafts by local chat.
+    if(!ownedDraft||ownedDraft.url!==location.href||ownedDraft.text!==normalized(input.innerText)||hasComposerAttachments(composerRoot()))return false;
+    input.focus();const range=document.createRange();range.selectNodeContents(input);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+    if(!document.execCommand('insertText',false,text))throw Error('Не удалось обновить черновик Claude.');
+    input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertReplacementText',data:text}));ownedDraft={text:normalized(text),url:location.href};return true;
   }
   function isSendButton(node){
     if(/^(chat-input-send|send-button|send-message-button)$/.test(node.getAttribute('data-testid')||''))return true;
@@ -227,6 +235,47 @@
   const turnKey=node=>node.getAttribute('data-message-id')||node.getAttribute('data-turn-key')||node.id||node;
   function base64(bytes){let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(text);}
   const textFile=(name,text)=>({name,type:'text/plain',data:base64(new TextEncoder().encode(text))});
+  function assistantFileScope(root){
+    // Generated media may be a sibling of the text node. Stop at the boundary
+    // of this turn; never scan the whole history or an unrelated open viewer.
+    let scope=root;
+    for(let depth=0;depth<5;depth++){
+      const parent=scope.parentElement;
+      if(!parent||parent.matches('main,body,html,[role="main"]')||parent.contains(editor())||all('[data-testid="user-message"],[data-message-author-role="user"]',parent).length)break;
+      if(responses().some(n=>n!==root&&parent.contains(n)))break;
+      scope=parent;
+    }
+    return scope;
+  }
+  const rasterExtension=/\.(png|jpe?g|gif|webp|avif|bmp)$/i;
+  function imageReferences(scope){
+    const images=all('img',scope).filter(img=>activeControl(img)&&img.getBoundingClientRect().width>=48&&img.getBoundingClientRect().height>=48&&!img.closest('[data-testid="message-actions"],[data-testid="user-message-actions"]'));
+    const mentioned=[...new Set((scope.innerText||'').match(/[\p{L}\p{N}_-][\p{L}\p{N}_.-]*\.(?:png|jpe?g|gif|webp|avif|bmp)\b/giu)||[])];
+    return images.flatMap((img,i)=>{
+      const href=img.currentSrc||img.src;if(!href)return [];
+      const container=img.closest('[data-filename],a[download]');
+      let pathName='';try{pathName=decodeURIComponent(new URL(href,location.href).pathname.split('/').at(-1));}catch{}
+      const name=[container?.getAttribute('data-filename'),container?.getAttribute('download'),img.alt,img.title,images.length===1&&mentioned.length===1?mentioned[0]:'',pathName].find(n=>n&&rasterExtension.test(n))||'image-'+(i+1);
+      return [{href,download:name,innerText:name,requireImage:true}];
+    });
+  }
+  function rasterType(bytes){
+    if(bytes[0]===137&&new TextDecoder('ascii').decode(bytes.subarray(1,8))==='PNG\r\n\x1a\n')return ['image/png','png'];
+    if(bytes[0]===255&&bytes[1]===216&&bytes[2]===255)return ['image/jpeg','jpg'];
+    const start=new TextDecoder('ascii').decode(bytes.subarray(0,16));
+    if(/^GIF8[79]a/.test(start))return ['image/gif','gif'];
+    if(start.startsWith('RIFF')&&start.slice(8,12)==='WEBP')return ['image/webp','webp'];
+    if(start.slice(4,8)==='ftyp'&&/avif|avis/.test(start.slice(8)))return ['image/avif','avif'];
+    if(start.startsWith('BM'))return ['image/bmp','bmp'];
+    return null;
+  }
+  function fileDiagnostics(){
+    const address=value=>{try{const u=new URL(value,location.href);if(u.protocol==='data:')return u.href.slice(0,80).split(',')[0]+',…';if(u.protocol==='blob:')return 'blob:'+u.origin+'/…';return u.origin+u.pathname.replace(/[a-f0-9-]{24,}/gi,'…')+(u.search?'?'+[...new Set(u.searchParams.keys())].join('&'):'');}catch{return '';}};
+    const describe=node=>({tag:node.tagName,testId:node.getAttribute('data-testid'),role:node.getAttribute('role'),label:(node.getAttribute('aria-label')||node.getAttribute('title')||node.getAttribute('alt')||'').slice(0,160),parents:[...function*(n){for(let i=0;n&&i<5;i++,n=n.parentElement)yield n.tagName+(n.getAttribute('data-testid')?'[data-testid='+n.getAttribute('data-testid')+']':'')+(n.getAttribute('role')?'[role='+n.getAttribute('role')+']':'');}(node.parentElement)]});
+    const root=responses().at(-1),scope=root?assistantFileScope(root):null;
+    const imageInfo=img=>({...describe(img),inLastTurn:!!scope?.contains(img),width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,complete:img.complete,source:address(img.currentSrc||img.src)});
+    return {version:12,path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
+  }
   const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
   function pdfCards(root){
     const metadata=/^(?:документ|document)\s*[·•.\-:]?\s*pdf$/i;
@@ -259,6 +308,20 @@
       url.hash='';return [{href:url.href,download:node.getAttribute('download')||name,innerText:name,requirePDF:true}];
     });
   }
+  function downloadControls(scope=document){return all('button,[role="button"]',scope).filter(n=>activeControl(n)&&[label(n),n.getAttribute('aria-label'),n.getAttribute('title')].some(s=>/^(download|скачать)(?:\s|$)/i.test(s||'')));}
+  async function nativePDFDownload(button,name){
+    const channel='clauderu-native-download-v1',nonce=crypto.randomUUID().replaceAll('-','');let armed=false,file=null,error='';
+    const receive=event=>{const data=event.data;if(event.source!==window||event.origin!==location.origin||data?.channel!==channel||data.nonce!==nonce)return;if(data.type==='armed')armed=true;else if(data.type==='file')file=data.file;else if(data.type==='error')error=String(data.error||'Не удалось получить файл');};
+    window.addEventListener('message',receive);
+    try{
+      window.postMessage({channel,type:'arm',nonce,name},location.origin);await waitFor(()=>armed,1000);
+      button.click();await waitFor(()=>file||error,9000);if(error)throw Error(error);
+      if(typeof file?.data!=='string'||file.data.length>Math.ceil(20*1024*1024*4/3)+4)throw Error('Некорректный размер файла');
+      const bytes=Uint8Array.from(atob(file.data),c=>c.charCodeAt(0));
+      if(!new TextDecoder().decode(bytes.subarray(0,1024)).includes('%PDF-'))throw Error('Вместо PDF получена страница просмотра');
+      return {href:URL.createObjectURL(new Blob([bytes],{type:'application/pdf'})),download:file.name||name,innerText:name,requirePDF:true,revoke:true};
+    }finally{window.postMessage({channel,type:'cancel',nonce},location.origin);window.removeEventListener('message',receive);}
+  }
   async function pdfCardFiles(root){
     const references=[],warnings=[];
     const cards=pdfCards(root);
@@ -268,6 +331,7 @@
       const panelSelector='[data-testid="file-preview"],[data-testid="document-preview"],[data-testid="file-viewer"],[data-testid="document-viewer"],[data-testid="artifact-panel"],[role="dialog"],iframe[src],embed[src],object[data]';
       const signature=n=>[n.textContent,...pdfReferences(n,name).map(r=>r.href)].join('\n');
       const previous=new Map(all(panelSelector).filter(visible).map(n=>[n,signature(n)]));
+      const previousDownloads=new Set(downloadControls());
       const controlled=document.getElementById((target.getAttribute('aria-controls')||card.getAttribute('aria-controls'))||'');if(visible(controlled))previous.set(controlled,signature(controlled));
       const wasOpen=target.getAttribute('aria-expanded')==='true'||target.getAttribute('aria-pressed')==='true';
       if(!wasOpen)target.click();
@@ -275,16 +339,19 @@
         const sources=await waitFor(()=>{
           const id=(target.getAttribute('aria-controls')||card.getAttribute('aria-controls')),panels=id?[document.getElementById(id)]:all(panelSelector);
           const current=panels.filter(n=>visible(n)&&(wasOpen||!previous.has(n)||previous.get(n)!==signature(n)));
-          const links=current.flatMap(n=>pdfReferences(n,name));return links.length?links:null;
+          const download=current.flatMap(n=>downloadControls(n)).find(Boolean)||downloadControls().find(n=>!previousDownloads.has(n));
+          if(download)return {download};
+          const links=current.flatMap(n=>pdfReferences(n,name));return links.length?{links}:null;
         },3500);
-        references.push(...sources.map(r=>({...r,pdfGroup:card})));
+        if(sources.download)references.push({...await nativePDFDownload(sources.download,name),pdfGroup:card});
+        else references.push(...sources.links.map(r=>({...r,pdfGroup:card})));
       }catch{warnings.push('Не удалось получить PDF «'+name+'» из Claude. Откройте документ на Mac и обновите этот чат.');}
     }
     return {references,warnings};
   }
   async function collectFiles({openArtifact=false}={}){
     const files=[],warnings=[];let total=0;const seen=new Set(),downloadedPDFs=new Set(),pdfErrors=new Map();
-    const root=responses().at(-1);if(!root)return {files,warnings};
+    const root=responses().at(-1);if(!root)return {files,warnings};const scope=assistantFileScope(root);
     const artifact=all('[data-testid="artifact-button"],button[aria-label*="artifact" i],button[aria-label*="артефакт" i]',root).find(n=>visible(n)&&(n.dataset.testid==='artifact-button'||/^(open artifact|открыть артефакт|artifact\b|артефакт(?:\s|:|$))/i.test(label(n))));
     let panel=null;
     const codeSelector='pre code,pre:not(:has(code)),[data-testid="artifact-code"]:not(:has(code,pre)),textarea[readonly]';
@@ -302,16 +369,19 @@
       }catch{/* Missing export does not invalidate the assistant's answer. */}
     }
     const linkSelector='a[download],a[href^="blob:"],a[href*="/download"],a[href*="/files/"],a[href*="/artifacts/"],a[href$=".pdf" i],a[href*=".pdf?" i]';
-    const pdfs=await pdfCardFiles(root);warnings.push(...pdfs.warnings);
-    const links=[...[...new Set([...all(linkSelector,root),...(panel?all(linkSelector,panel):[])])].filter(visible),...pdfs.references];
+    const pdfs=await pdfCardFiles(scope);warnings.push(...pdfs.warnings);
+    const links=[...imageReferences(scope),...[...new Set([...all(linkSelector,scope),...(panel?all(linkSelector,panel):[])])].filter(visible),...pdfs.references];
     for(const a of links){
       if(files.length>=5)break;if(a.pdfGroup&&downloadedPDFs.has(a.pdfGroup))continue;
       const url=new URL(a.href,location.href);
       if(seen.has(url.href))continue;seen.add(url.href);
-      if(url.username||url.password||!((url.protocol==='https:'&&url.origin===location.origin)||(url.protocol==='blob:'&&url.origin===location.origin))){warnings.push('Файл «'+(a.innerText||'вложение')+'» находится на другом домене и не перенесён.');continue;}
+      const imageData=a.requireImage&&/^data:image\/(?:png|jpeg|gif|webp|avif|bmp);base64,/i.test(url.href);
+      const externalImage=a.requireImage&&url.protocol==='https:'&&url.origin!==location.origin;
+      if(url.username||url.password||!((url.protocol==='https:'&&(url.origin===location.origin||externalImage))||(url.protocol==='blob:'&&url.origin===location.origin)||imageData)){warnings.push('Файл «'+(a.innerText||'вложение')+'» имеет недоступный адрес и не перенесён.');continue;}
       let name=a.download||a.getAttribute?.('download')||a.innerText.trim()||url.pathname.split('/').at(-1)||'file';
       try{
-        const response=await fetch(url.href,{credentials:'same-origin',redirect:'error'});if(!response.ok)throw Error('HTTP '+response.status);
+        if(imageData&&url.href.length>Math.ceil(20*1024*1024*4/3)+200)throw Error('изображение больше 20 МБ');
+        const response=await fetch(url.href,{credentials:externalImage?'omit':'same-origin',redirect:a.requireImage?'follow':'error',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(20000)});if(!response.ok)throw Error('HTTP '+response.status);
         const disposition=response.headers.get('Content-Disposition')||'';
         const encoded=/filename\*=UTF-8''([^;]+)/i.exec(disposition),plain=/filename="([^"]+)"|filename=([^;]+)/i.exec(disposition);
         if(encoded){try{name=decodeURIComponent(encoded[1]);}catch{}}else if(plain)name=(plain[1]||plain[2]).trim();
@@ -321,10 +391,14 @@
         const isPDF=new TextDecoder('ascii').decode(bytes.subarray(0,1024)).includes('%PDF-');
         if((a.requirePDF||/\.pdf$/i.test(name))&&!isPDF)throw Error('вместо PDF получена страница просмотра');
         if(isPDF&&!/\.pdf$/i.test(name))name+='.pdf';
-        total+=size;files.push({name,type:isPDF?'application/pdf':(response.headers.get('Content-Type')||'application/octet-stream').split(';')[0],data:base64(bytes)});
+        const raster=rasterType(bytes);if(a.requireImage&&!raster)throw Error('вместо изображения получена страница просмотра');
+        if(a.requireImage&&!rasterExtension.test(name))name+='.'+raster[1];
+        total+=size;files.push({name,type:isPDF?'application/pdf':raster?.[0]||(response.headers.get('Content-Type')||'application/octet-stream').split(';')[0],data:base64(bytes)});
         if(a.pdfGroup){downloadedPDFs.add(a.pdfGroup);pdfErrors.delete(a.pdfGroup);}
       }catch(e){const warning='Не удалось перенести «'+name+'»: '+e.message;if(a.pdfGroup)pdfErrors.set(a.pdfGroup,warning);else warnings.push(warning);}
+      finally{if(a.revoke)URL.revokeObjectURL(a.href);}
     }
+    for(const reference of pdfs.references)if(reference.revoke)URL.revokeObjectURL(reference.href);
     warnings.push(...pdfErrors.values());
     // Export code as a file; never execute generated HTML/JS in our interface.
     const codeNodes=[...all('pre code',root),...(panel?all(codeSelector,panel):[])].filter(visible);
@@ -339,9 +413,10 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:11});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:12});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
+    if(message.kind==='diagnostics'){respond({done:true,result:fileDiagnostics()});return;}
     if(busy){respond({error:'Во вкладке уже выполняется запрос',notSent:true});return;}busy=true;activeJobId=message.id;
     (async()=>{
       let submissionAttempted=false;
@@ -360,7 +435,9 @@
         }
         if(message.kind!=='chat')throw Error('Неизвестная команда расширения. Обновите ClaudeRU и вкладку Claude.');
         let input=await waitFor(editor);
-        if(input.innerText.trim()&&(normalized(input.innerText)!==normalized(message.text)||(message.files?.length||0)>0||hasComposerAttachments(composerRoot())))throw Error('Во вкладке есть другой неотправленный черновик или вложения. Отправьте или удалите их вручную.');
+        if(input.innerText.trim()&&(normalized(input.innerText)!==normalized(message.text)||(message.files?.length||0)>0||hasComposerAttachments(composerRoot()))){
+          if(!replaceOwnedDraft(input,message.text||'Посмотри прикреплённые файлы.'))throw Error('Во вкладке есть другой неотправленный черновик или вложения. Отправьте или удалите их вручную.');
+        }
         await applySettings(message.settings);
         requireAvailable();if(readState().streaming)throw Error('В этом чате Claude ещё отвечает. Дождитесь завершения ответа.');
         const upload=await attachFiles(message.files);
@@ -387,7 +464,7 @@
         const before=responses().length,beforeUsers=new Set(userMessages().map(turnKey)),beforeAnswers=new Set(responses().map(turnKey));
         // One click only. A failed acknowledgement must never trigger a blind resend.
         if(!sendEnabled(send))throw Error('Поле Claude обновилось перед отправкой. Черновик сохранён.');
-        submissionAttempted=true;send.click();
+        ownedDraft=null;submissionAttempted=true;send.click();
         try{
           await waitFor(()=>{requireAvailable();return userMessages().some(n=>!beforeUsers.has(turnKey(n))&&normalized(messageText(n)).includes(normalized(text)))||responses().some(n=>!beforeAnswers.has(turnKey(n))&&n.getAttribute('data-is-streaming')==='true')||responses().length>before;},10000);
         }catch(e){if(e.state){e.notSent=!userMessages().some(n=>!beforeUsers.has(turnKey(n)));throw e;}throw Error('После нажатия Claude не подтвердил отправку. Проверьте вкладку на Mac; повторного нажатия не было.');}

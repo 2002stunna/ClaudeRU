@@ -1,12 +1,12 @@
 import { MODEL_NAMES } from '/model-catalog.js';
 const $=id=>document.getElementById(id);
-let chats=[],selected=null,operation=false,sending=new Set(),catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
+let chats=[],selected=null,operation=false,initializing=false,sending=new Set(),catalog=null,catalogError='',lastSyncAttempt=0,sortMode='recent',lastBridgeError=null;
 let statusRequestInFlight=false,stateRequestInFlight=false,contextChat=null,renameTarget=null,archiveView=false,pendingSelection=null;const remoteBusy=new Set();
 const busyHere=()=>sending.has(selected)||remoteBusy.has(selected);
 const messageNodes=new WeakMap();
 const drafts=new Map();const effortLabels={low:'Низкий',medium:'Средний',high:'Высокий',xhigh:'Сверхвысокий',max:'Максимальный'};
 const current=()=>chats.find(c=>c.id===selected);
-const draft=()=>{if(!drafts.has(selected))drafts.set(selected,{text:'',files:[]});return drafts.get(selected);};
+const draft=()=>{if(!drafts.has(selected))drafts.set(selected,{text:current()?.draft?.text||'',files:[...(current()?.draft?.files||[])]});return drafts.get(selected);};
 const status=text=>{$('status').textContent=text;$('status').hidden=!text;};
 const svg=name=>{const node=document.createElementNS('http://www.w3.org/2000/svg','svg');node.classList.add('icon');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-'+name);node.append(use);return node;};
 async function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
@@ -17,8 +17,11 @@ function fileCard(file,removable=false){
   const card=document.createElement('div');card.className='file-card';
   const icon=document.createElement('span');icon.className='file-icon';icon.textContent=file.name.split('.').at(-1).slice(0,5).toUpperCase();
   const info=document.createElement('div'),name=document.createElement('strong'),detail=document.createElement('small');name.textContent=file.name;detail.textContent=formatSize(file.size);info.append(name,detail);
-  const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(file.id);download.download=file.name;download.textContent=file.type==='application/pdf'?'Скачать':'↓';if(file.type==='application/pdf')download.classList.add('file-download-label');download.title='Скачать '+file.name;download.setAttribute('aria-label','Скачать '+file.name);
+  const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(file.id);download.download=file.name;download.textContent='Скачать';download.classList.add('file-download-label');download.title='Скачать '+file.name;download.setAttribute('aria-label','Скачать '+file.name);
   card.append(icon,info,download);
+  if(/^image\/(png|jpeg|gif|webp|avif|bmp)$/i.test(file.type)){
+    const image=document.createElement('img');image.className='file-image';image.src=download.href+'?preview=1';image.alt=file.name;image.loading='lazy';card.classList.add('image-file-card');card.prepend(image);
+  }
   if(/\.(txt|md|json|csv|py|js|ts|css|html|sql|sh|xml|yaml|yml)$/i.test(file.name)){
     const preview=document.createElement('button');preview.type='button';preview.textContent='Просмотр';preview.onclick=async()=>{try{const res=await fetch('/api/files/'+encodeURIComponent(file.id));if(!res.ok)throw Error('Не удалось открыть файл');$('preview-name').textContent=file.name;$('preview-text').textContent=(await res.text()).slice(0,500000);$('preview-download').href=download.href;$('preview-download').download=file.name;$('file-preview').showModal();}catch(e){status(e.message);}};card.append(preview);
   }
@@ -78,12 +81,12 @@ function renderOptions(){
   updateControls();
 }
 function renderAttachments(){$('attachments').replaceChildren(...(draft().files||[]).map(f=>fileCard(f,true)));updateControls();}
-function updateControls(){const blocked=operation||busyHere()||current()?.claudeState?.streaming===true;
+function updateControls(){const blocked=initializing||operation||busyHere()||current()?.claudeState?.streaming===true;
   for(const id of ['model-toggle','sync','refresh-models','refresh-chat','attach','other-models-trigger','effort-menu-trigger','chat-title-button'])$(id).disabled=blocked;
   for(const button of document.querySelectorAll('#model-submenu button,#effort-options button'))button.disabled=blocked||button.dataset.available==='false';
   $('selected-model').disabled=blocked||$('current-model-name').textContent==='Подключите Claude';
   $('claude-notice').textContent=current()?.claudeState?.blocked||'';$('claude-notice').hidden=!$('claude-notice').textContent;
-  $('send').disabled=blocked||!!current()?.claudeState?.blocked||!($('prompt').value.trim()||draft().files.length);$('new-chat').disabled=operation;
+  $('send').disabled=blocked||!!current()?.claudeState?.blocked||!($('prompt').value.trim()||draft().files.length);$('new-chat').disabled=initializing||operation;$('prompt').disabled=initializing;
   $('catalog-loading').hidden=!operation||!!catalog;
 }
 function render(){renderSidebar();renderMessages();renderOptions();$('chat-title').textContent=current()?.title||'Новая сессия';$('pin-chat').textContent=current()?.pinned?'Открепить':'Закрепить';$('prompt').value=draft().text;renderAttachments();updateControls();}
@@ -104,7 +107,7 @@ async function sync({quiet=false,refreshCatalog=false}={}){
   catch(e){catalogError=e.message;renderOptions();status(e.message);}finally{finishOperation();renderOptions();}
 }
 async function showApp(){
-  $('login').hidden=true;$('app').hidden=false;
+  initializing=true;updateControls();$('login').hidden=true;$('app').hidden=false;
   try{
     ({chats}=await api('/api/chats'));
     if(!localStorage.getItem('clauderu-migrated')){
@@ -115,10 +118,11 @@ async function showApp(){
     selected=localStorage.getItem('clauderu-selected');if(!current())selected=chats[0]?.id||null;
     if(!selected){const bridge=await api('/api/bridge');if(bridge.connected)await sync({quiet:true});if(!selected)await newChat();}else{render();await refreshSelected();}
     await bridgeStatus();
-  }catch(e){status(e.message);}
+  }catch(e){status(e.message);}finally{initializing=false;updateControls();}
 }
 $('login-form').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{password:$('password').value});$('password').value='';await showApp();}catch(e){$('login-error').textContent=e.message;}};
 $('logout').onclick=async()=>{await post('/api/logout',{});location.reload();};$('new-chat').onclick=newChat;$('search').oninput=renderSidebar;$('sync').onclick=sync;$('refresh-models').onclick=()=>sync({refreshCatalog:true});
+$('file-diagnostics').onclick=async()=>{closePopovers();try{const {diagnostics}=await api('/api/file-diagnostics',{id:selected});const url=URL.createObjectURL(new Blob([JSON.stringify(diagnostics,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='clauderu-files-diagnostics.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){status(e.message);}};
 $('refresh-chat').onclick=()=>refreshSelected(selected,{collectArtifacts:true});
 $('toggle-sidebar').onclick=()=>{if(matchMedia('(max-width:700px)').matches){$('sidebar').classList.toggle('open');$('sidebar-backdrop').hidden=!$('sidebar').classList.contains('open');$('toggle-sidebar').setAttribute('aria-expanded',String($('sidebar').classList.contains('open')));}else document.body.classList.remove('sidebar-collapsed');};
 $('collapse-sidebar').onclick=()=>{if(matchMedia('(max-width:700px)').matches){$('sidebar').classList.remove('open');$('sidebar-backdrop').hidden=true;}else document.body.classList.add('sidebar-collapsed');};

@@ -14,6 +14,7 @@ async function fixture(t){
   await context.route('https://claude.ai/**',route=>route.fulfill({status:200,contentType:route.request().url().includes('/files/')?'text/csv':'text/html',body:route.request().url().includes('/files/')?'column\nvalue':html}));
   await context.addInitScript(()=>{const workerClock=window.setTimeout.bind(window);window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{if(event.type==='wait')return new Promise(resolve=>workerClock(()=>resolve({ok:true}),event.ms));window.events.push({...event,at:performance.now()});return{ok:true};}}};});
   const page=await context.newPage();await page.goto('https://claude.ai/chat/current-123');
+  await page.addScriptTag({path:new URL('../extension/download-observer.js',import.meta.url).pathname});
   await page.addScriptTag({path:new URL('../extension/content.js',import.meta.url).pathname});
   const run=job=>page.evaluate(message=>new Promise(resolve=>window.extensionHandler({...message,type:'run',id:'test-job'},{id:'clauderu-test'},resolve)),job);
   return{page,run};
@@ -133,7 +134,7 @@ test('connection status is fetched once per second without reloading the website
 test('streaming updates the active answer while preserving previous message nodes',{skip:!executable},async t=>{
   const {createApp}=await import('../server.mjs');const {scryptSync}=await import('node:crypto');let next,finish;
   const nextPart=new Promise(r=>next=r),finished=new Promise(r=>finish=r);t.after(()=>{next();finish();});
-  const bridge={status:{connected:true},execute:async()=>({catalog:mockCatalog({models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}}),chats:[]}),send:async job=>{job.onUpdate({text:'Первая часть',url:'https://claude.ai/chat/stream-test'});await nextPart;job.onUpdate({text:'Первая часть. Продолжение.',url:'https://claude.ai/chat/stream-test'});await finished;}};
+  const bridge={status:{connected:true},execute:async()=>{await new Promise(resolve=>setTimeout(resolve,120));return{catalog:mockCatalog({models:['Sonnet 5.5'],efforts:[],current:{model:'Sonnet 5.5'}}),chats:[]};},send:async job=>{job.onUpdate({text:'Первая часть',url:'https://claude.ai/chat/stream-test'});await nextPart;job.onUpdate({text:'Первая часть. Продолжение.',url:'https://claude.ai/chat/stream-test'});await finished;}};
   const server=createApp({auth:{salt:'test',hash:scryptSync('test-password','test',64).toString('hex')},bridge});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
   const context=await browser.newContext();t.after(()=>context.close());const page=await context.newPage();
@@ -143,6 +144,62 @@ test('streaming updates the active answer while preserving previous message node
   await page.getByText('Первая часть. Продолжение.',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.previousMessageNode===document.querySelector('article.user')),true);finish();await page.waitForFunction(()=>!document.querySelector('#model-toggle').disabled);
 });
 const tinyPNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKz8AAAAASUVORK5CYII=';
+test('generated PNG images transfer actual data, blob and HTTPS bytes without a download anchor',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t),png=Buffer.from(tinyPNG,'base64');
+  await page.route('https://claude.ai/api/account-id/files/generated-id/preview',r=>r.fulfill({contentType:'image/png',body:png}));
+  await page.evaluate(data=>{
+    const bytes=Uint8Array.from(atob(data),c=>c.charCodeAt(0));
+    document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message"><p>Три изображения</p></div>';
+    const root=document.querySelector('[data-testid="assistant-message"]');
+    for(const [i,src] of ['data:image/png;base64,'+data,URL.createObjectURL(new Blob([bytes],{type:'image/png'})),'/api/account-id/files/generated-id/preview'].entries()){const img=document.createElement('img');img.src=src;img.width=240;img.height=135;img.alt='black-'+i+'.png';root.append(img);}
+  },tinyPNG);
+  const result=await run({kind:'open',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);
+  const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,3);assert.deepEqual(files.map(f=>f.name),['black-0.png','black-1.png','black-2.png']);
+  for(const file of files){assert.equal(file.type,'image/png');assert.deepEqual(Buffer.from(file.data,'base64'),png);}assert.deepEqual(result.result.warnings,[]);
+});
+test('generated media beside the assistant text is exported while older images and avatars are excluded',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(data=>{
+    document.querySelector('#transcript').innerHTML='<article><div data-testid="assistant-message">Старое изображение</div><img alt="old.png" width="240" height="135"></article><div data-testid="user-message">Пришли картинку</div><article id="latest-turn"><div><div data-testid="assistant-message"><p>Готово — black.png.</p></div></div><button aria-label="Открыть картинку"><img width="240" height="135"></button><img alt="avatar.png" width="16" height="16"></article>';
+    document.querySelectorAll('#transcript img').forEach(img=>img.src='data:image/png;base64,'+data);
+  },tinyPNG);
+  const result=await run({kind:'open',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'black.png');assert.equal(files[0].data,tinyPNG);
+});
+test('external response images use CORS without account cookies and invalid image bytes are rejected',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t),requests=[];
+  await page.context().addCookies([{name:'cdn-session',value:'private',domain:'images.example.test',path:'/',secure:true}]);
+  await page.route('https://images.example.test/**',route=>{if(route.request().resourceType()==='fetch')requests.push(route.request().headers());return route.fulfill({contentType:'image/png',headers:{'Access-Control-Allow-Origin':'*'},body:route.request().url().endsWith('/bad')?Buffer.from('<html>Login</html>'):Buffer.from(tinyPNG,'base64')});});
+  await page.evaluate(()=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message"><img src="https://images.example.test/good" alt="good.png" width="200" height="100"><img src="https://images.example.test/bad" alt="bad.png" width="200" height="100"></div>';});
+  const result=await run({kind:'open',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'good.png');assert.ok(requests.length>=2);assert.ok(requests.every(h=>!h.cookie));assert.match(result.result.warnings.join(' '),/вместо изображения/);
+});
+test('stable chat-input takes priority over a visible artifact editor with a different draft',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{const artifact=document.createElement('div');artifact.setAttribute('contenteditable','true');artifact.setAttribute('role','textbox');artifact.textContent='Чужой редактор';document.body.prepend(artifact);window.nativeSend=0;document.querySelector('#send').onclick=()=>{window.nativeSend++;const input=document.querySelector('[data-testid="chat-input"]'),user=document.createElement('div');user.dataset.testid='user-message';user.textContent=input.innerText;input.innerText='';const answer=document.createElement('div');answer.dataset.testid='assistant-message';answer.dataset.isStreaming='false';answer.textContent='Ответ';document.querySelector('#transcript').append(user,answer);};});
+  const result=await run({kind:'chat',text:'Запрос',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.equal(await page.evaluate(()=>window.nativeSend),1);assert.equal(await page.locator('body>[contenteditable]').innerText(),'Чужой редактор');
+});
+test('a failed wrapper draft can be replaced without erasing manual edits or resending after a click',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);
+  await page.evaluate(()=>{const input=document.querySelector('[data-testid="chat-input"]');input.addEventListener('input',()=>{document.querySelector('#send').disabled=true;const alert=document.createElement('div');alert.setAttribute('role','alert');alert.textContent='Лимит сообщений исчерпан';document.querySelector('main').append(alert);},{once:true});});
+  let result=await run({kind:'chat',text:'Первый запрос',catalogCache:mockCatalog()});assert.equal(result.notSent,true);assert.equal(await page.locator('[data-testid="chat-input"]').innerText(),'Первый запрос');
+  await page.evaluate(()=>{document.querySelector('[role="alert"]').remove();document.querySelector('#send').disabled=false;});
+  result=await run({kind:'chat',text:'Второй запрос',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.equal(await page.locator('[data-testid="user-message"]').innerText(),'Второй запрос');
+  await page.locator('[data-testid="chat-input"]').fill('Написано вручную');result=await run({kind:'chat',text:'Третий запрос',catalogCache:mockCatalog()});assert.equal(result.notSent,true);assert.equal(await page.locator('[data-testid="chat-input"]').innerText(),'Написано вручную');
+});
+test('file diagnostics report bounded native media metadata without message text or signed URL values',{skip:!executable},async t=>{
+  const {page,run}=await fixture(t);await page.evaluate(data=>{document.querySelector('#transcript').innerHTML='<div data-testid="assistant-message"><p>Private message body</p><img alt="black.png" width="200" height="100"></div>';document.querySelector('img').src='data:image/png;base64,'+data;const frame=document.createElement('iframe');frame.src='/files/preview?token=secret-signed-value';document.body.append(frame);},tinyPNG);
+  const result=await run({kind:'diagnostics'});assert.equal(result.done,true,result.error);assert.equal(result.result.images[0].inLastTurn,true);assert.equal(result.result.images[0].width,200);assert.ok(!JSON.stringify(result).includes('Private message body'));assert.ok(!JSON.stringify(result).includes('secret-signed-value'));assert.ok(!JSON.stringify(result).includes(tinyPNG));
+});
+test('a native generated PNG reaches the wrapper preview and downloads byte-for-byte on mobile',{skip:!executable},async t=>{
+  const {page:source,run}=await fixture(t);await source.evaluate(data=>{document.querySelector('#transcript').innerHTML='<article><div data-testid="assistant-message">Готово — black.png.</div><button><img alt="black.png" width="240" height="135"></button></article>';document.querySelector('img').src='data:image/png;base64,'+data;},tinyPNG);
+  const {createApp}=await import('../server.mjs'),{DataStore}=await import('../data-store.mjs'),{scryptSync}=await import('node:crypto');const store=new DataStore();await store.saveModelCatalog(mockCatalog());
+  const bridge={status:{connected:true},execute:async job=>{if(job.kind==='inspect')return {chats:[{title:'Картинка',url:'https://claude.ai/chat/current-123'}],catalog:mockCatalog()};if(job.kind==='state')return {state:{model:'Fable 5.1',effort:'medium'}};const reply=await run({...job,catalogCache:mockCatalog()});if(reply.error)throw Error(reply.error);return reply.result;}};
+  const server=createApp({auth:{salt:'test',hash:scryptSync('pw','test',64).toString('hex')},bridge,store});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.closeAllConnections();server.close(r);}));
+  const context=await browser.newContext({viewport:{width:390,height:844},acceptDownloads:true});t.after(()=>context.close());const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#password').fill('pw');await page.locator('#login-form button').click();const card=page.locator('article.assistant .file-card');await card.locator('strong').filter({hasText:'black.png'}).waitFor();
+  await page.waitForFunction(()=>document.querySelector('.file-image')?.naturalWidth===1);const imageURL=await card.locator('img').getAttribute('src');const preview=await page.request.get(imageURL);assert.match(preview.headers()['content-disposition'],/^inline;/);assert.deepEqual(await preview.body(),Buffer.from(tinyPNG,'base64'));
+  const downloading=page.waitForEvent('download');await card.getByRole('link',{name:'Скачать black.png'}).click();const download=await downloading;assert.equal(download.suggestedFilename(),'black.png');assert.deepEqual(await readFile(await download.path()),Buffer.from(tinyPNG,'base64'));assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.locator('#toggle-sidebar').click();await page.locator('#account-toggle').click();const reportDownload=page.waitForEvent('download');await page.locator('#file-diagnostics').click();const report=await reportDownload;assert.equal(JSON.parse(await readFile(await report.path(),'utf8')).images[0].inLastTurn,true);assert.deepEqual(errors,[]);
+});
 test('thumbnail-only image uploads are submitted once after processing and editor remount',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);
   await page.evaluate(()=>{
@@ -360,6 +417,27 @@ test('a PDF document card opens its preview and transfers the actual PDF bytes w
     document.querySelector('[data-testid="generated-file"]').onclick=()=>{const panel=document.createElement('div');panel.id='pdf-preview';panel.dataset.testid='document-preview';panel.innerHTML='<iframe src="/files/burger-document#page=1"></iframe><a href="/files/burger-document" download="burger.pdf">Скачать</a>';document.body.append(panel);};
   });
   const reply=await run({kind:'open'});assert.equal(reply.done,true,reply.error);const message=reply.result.snapshot.messages.at(-1);assert.deepEqual(reply.result.warnings,[]);assert.equal(message.text,'Готово — burger.pdf.');assert.equal(message.files.length,1);assert.equal(message.files[0].name,'burger.pdf');assert.equal(message.files[0].type,'application/pdf');assert.deepEqual(Buffer.from(message.files[0].data,'base64'),pdf);
+});
+test('a native PDF download button without a DOM URL transfers its ephemeral blob without a Mac download',{skip:!executable},async t=>{
+  const {page}=await fixture(t);const downloads=[];page.on('download',d=>downloads.push(d));
+  // Run the controller in an isolated world, as the real extension does. Only
+  // the observer and Claude's download handler share the page's MAIN world.
+  const session=await page.context().newCDPSession(page),tree=await session.send('Page.getFrameTree');
+  const {executionContextId}=await session.send('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'clauderu-controller'});
+  await session.send('Runtime.evaluate',{contextId:executionContextId,expression:"window.chrome={runtime:{id:'isolated-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:message=>new Promise(resolve=>setTimeout(()=>resolve({ok:true}),message.ms||0))}};"});
+  await session.send('Runtime.evaluate',{contextId:executionContextId,expression:await readFile(new URL('../extension/content.js',import.meta.url),'utf8')});
+  const run=async message=>{const reply=await session.send('Runtime.evaluate',{contextId:executionContextId,awaitPromise:true,returnByValue:true,expression:`new Promise(resolve=>window.extensionHandler(${JSON.stringify({...message,type:'run',id:'isolated-job'})},{id:'isolated-test'},resolve))`});assert.equal(reply.exceptionDetails,undefined);return reply.result.value;};
+  await page.evaluate(()=>{
+    document.querySelector('#transcript').innerHTML='<article><div data-testid="assistant-message">Готово — burger.pdf.</div><div role="button" data-testid="file-card">Burger Документ · PDF</div></article>';
+    window.downloadClicks=0;document.querySelector('[data-testid="file-card"]').onclick=()=>{
+      const viewer=document.createElement('section');viewer.innerHTML='<h2>Burger · PDF</h2><button title="Скачать">↓</button>';
+      viewer.querySelector('button').onclick=()=>{window.downloadClicks++;const link=document.createElement('a');link.download='burger.pdf';link.href=URL.createObjectURL(new Blob(['%PDF-1.7\nnative generated burger\n%%EOF'],{type:'application/pdf'}));link.click();URL.revokeObjectURL(link.href);};document.body.append(viewer);
+    };
+  });
+  const result=await run({kind:'open',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.deepEqual(result.result.warnings,[]);const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'burger.pdf');assert.equal(Buffer.from(files[0].data,'base64').toString(),'%PDF-1.7\nnative generated burger\n%%EOF');assert.equal(await page.evaluate(()=>window.downloadClicks),1);assert.equal(downloads.length,0);
+});
+test('the PDF download observer leaves ordinary user downloads working outside a requested capture',{skip:!executable},async t=>{
+  const {page}=await fixture(t);const downloading=page.waitForEvent('download');await page.evaluate(()=>{const link=document.createElement('a');link.download='manual.pdf';link.href=URL.createObjectURL(new Blob(['%PDF-1.7\nmanual\n%%EOF'],{type:'application/pdf'}));link.click();});const download=await downloading;assert.equal(download.suggestedFilename(),'manual.pdf');assert.equal(await readFile(await download.path(),'utf8'),'%PDF-1.7\nmanual\n%%EOF');
 });
 test('a reused PDF viewer waits for the new blob instead of copying a previous document',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);await page.evaluate(()=>{

@@ -58,7 +58,7 @@ test('authenticated workspace: models, old chats, uploads, streamed generated fi
   assert.equal((await post('/api/chats/metadata',{id:chat.id,title:''})).status,400);
   const beforeFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);
   const failed=await post('/api/chat',{chatId:chat.id,text:'Отклонить до отправки',fileIds:[file.id]});const failure=JSON.parse((await failed.text()).trim());assert.equal(failure.type,'error');assert.equal(failure.notSent,true);
-  const afterFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);assert.equal(afterFailure.messages.length,beforeFailure.messages.length);assert.equal(afterFailure.title,beforeFailure.title);
+  const afterFailure=(await(await get('/api/chats')).json()).chats.find(c=>c.id===chat.id);assert.equal(afterFailure.messages.length,beforeFailure.messages.length);assert.equal(afterFailure.title,beforeFailure.title);assert.equal(afterFailure.draft.text,'Отклонить до отправки');assert.equal(afterFailure.draft.files[0].id,file.id);
 });
 
 test('native chat metadata is saved only after confirmation and deleted chats stay deleted after sync',async t=>{

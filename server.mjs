@@ -79,9 +79,9 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         if(!authorized)return json(401,{error:'Войдите в систему'});
         if(req.url==='/api/bridge')return json(200,{...(bridge.status||{mode:'browser',connected:true}),busy:active.size>0,activeChats:[...active.entries()].map(([id,kind])=>({id,kind}))});
         if(req.url==='/api/chats')return json(200,{chats:await store.list()});
-        const fileMatch=/^\/api\/files\/([a-f0-9]{32})$/.exec(req.url);
+        const fileMatch=/^\/api\/files\/([a-f0-9]{32})(\?preview=1)?$/.exec(req.url);
         if(fileMatch){
-          try { const {meta,bytes}=await store.readFile(fileMatch[1]);res.writeHead(200,{'Content-Type':meta.type,'Content-Disposition':`attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(meta.name.toWellFormed())}`,'Content-Length':bytes.length});res.end(bytes); }
+          try { const {meta,bytes}=await store.readFile(fileMatch[1]);const inline=!!fileMatch[2]&&/^image\/(png|jpeg|gif|webp|avif|bmp)$/i.test(meta.type);res.writeHead(200,{'Content-Type':meta.type,'Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encodeURIComponent(meta.name.toWellFormed())}`,'Content-Length':bytes.length});res.end(bytes); }
           catch{return json(404,{error:'Файл не найден'});}return;
         }
         return json(404,{error:'Не найдено'});
@@ -105,6 +105,9 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
       if(req.url==='/api/logout'){sessions.delete(cookie);res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return json(200,{ok:true});}
       if(req.url==='/api/uploads'){
         try{return json(200,{file:await store.putFile(body)});}catch(e){return json(400,{error:e.message});}
+      }
+      if(req.url==='/api/file-diagnostics'){
+        try{const chat=await store.get(body.id);return json(200,{diagnostics:await bridge.execute({kind:'diagnostics',chatId:chat.id,url:chat.url})});}catch(e){return json(400,{error:e.message});}
       }
       if(req.url==='/api/chats/new'){
         try{return json(200,{chat:await store.create({settings:chatOptions(body.settings)})});}catch(e){return json(400,{error:e.message});}
@@ -175,7 +178,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           chat=body.chatId?await store.get(body.chatId):await store.create({url:body.url||null});
           if(active.has(chat.id))return json(409,{error:'В этом чате уже формируется ответ. Дождитесь его завершения.'});
         }catch(e){return json(400,{error:e.message});}
-        const previousTitle=chat.title,previousLoaded=chat.loaded;active.set(chat.id,'chat');chat.settings=settings;
+        const previousTitle=chat.title,previousLoaded=chat.loaded;active.set(chat.id,'chat');chat.settings=settings;delete chat.draft;
         if(!chat.customTitle&&!chat.messages.length&&body.text.trim())chat.title=body.text.slice(0,60);
         chat.messages.push({role:'user',text:body.text,files:files.map(({data,...meta})=>meta)});
         const answer={role:'assistant',text:'',files:[]};chat.messages.push(answer);chat.loaded=true;
@@ -191,7 +194,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
           applyState(chat,result?.state);
           if(result?.title&&!chat.customTitle)chat.title=String(result.title).slice(0,160);
           await store.save(chat);write({type:'done',chat});
-        }catch(e){applyState(chat,e.state);if(e.notSent===true){const index=chat.messages.indexOf(answer);if(index>=1)chat.messages.splice(index-1,2);chat.title=previousTitle;chat.loaded=previousLoaded;}else answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message,notSent:e.notSent===true,state:e.state});}
+        }catch(e){applyState(chat,e.state);if(e.notSent===true){const index=chat.messages.indexOf(answer);if(index>=1)chat.messages.splice(index-1,2);chat.title=previousTitle;chat.loaded=previousLoaded;chat.draft={text:body.text,files:files.map(({data,...meta})=>meta)};}else answer.error=e.message;try{await store.save(chat);}catch{}write({type:'error',error:e.message,notSent:e.notSent===true,state:e.state});}
         finally{active.delete(chat.id);res.end();}return;
       }
       return json(404,{error:'Не найдено'});
