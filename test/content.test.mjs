@@ -14,7 +14,6 @@ async function fixture(t){
   await context.route('https://claude.ai/**',route=>route.fulfill({status:200,contentType:route.request().url().includes('/files/')?'text/csv':'text/html',body:route.request().url().includes('/files/')?'column\nvalue':html}));
   await context.addInitScript(()=>{const workerClock=window.setTimeout.bind(window);window.events=[];window.chrome={runtime:{id:'clauderu-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:async event=>{if(event.type==='wait')return new Promise(resolve=>workerClock(()=>resolve({ok:true}),event.ms));window.events.push({...event,at:performance.now()});return{ok:true};}}};});
   const page=await context.newPage();await page.goto('https://claude.ai/chat/current-123');
-  await page.addScriptTag({path:new URL('../extension/download-observer.js',import.meta.url).pathname});
   await page.addScriptTag({path:new URL('../extension/content.js',import.meta.url).pathname});
   const run=job=>page.evaluate(message=>new Promise(resolve=>window.extensionHandler({...message,type:'run',id:'test-job'},{id:'clauderu-test'},resolve)),job);
   return{page,run};
@@ -417,27 +416,6 @@ test('a PDF document card opens its preview and transfers the actual PDF bytes w
     document.querySelector('[data-testid="generated-file"]').onclick=()=>{const panel=document.createElement('div');panel.id='pdf-preview';panel.dataset.testid='document-preview';panel.innerHTML='<iframe src="/files/burger-document#page=1"></iframe><a href="/files/burger-document" download="burger.pdf">Скачать</a>';document.body.append(panel);};
   });
   const reply=await run({kind:'open'});assert.equal(reply.done,true,reply.error);const message=reply.result.snapshot.messages.at(-1);assert.deepEqual(reply.result.warnings,[]);assert.equal(message.text,'Готово — burger.pdf.');assert.equal(message.files.length,1);assert.equal(message.files[0].name,'burger.pdf');assert.equal(message.files[0].type,'application/pdf');assert.deepEqual(Buffer.from(message.files[0].data,'base64'),pdf);
-});
-test('a native PDF download button without a DOM URL transfers its ephemeral blob without a Mac download',{skip:!executable},async t=>{
-  const {page}=await fixture(t);const downloads=[];page.on('download',d=>downloads.push(d));
-  // Run the controller in an isolated world, as the real extension does. Only
-  // the observer and Claude's download handler share the page's MAIN world.
-  const session=await page.context().newCDPSession(page),tree=await session.send('Page.getFrameTree');
-  const {executionContextId}=await session.send('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'clauderu-controller'});
-  await session.send('Runtime.evaluate',{contextId:executionContextId,expression:"window.chrome={runtime:{id:'isolated-test',onMessage:{addListener:fn=>window.extensionHandler=fn},sendMessage:message=>new Promise(resolve=>setTimeout(()=>resolve({ok:true}),message.ms||0))}};"});
-  await session.send('Runtime.evaluate',{contextId:executionContextId,expression:await readFile(new URL('../extension/content.js',import.meta.url),'utf8')});
-  const run=async message=>{const reply=await session.send('Runtime.evaluate',{contextId:executionContextId,awaitPromise:true,returnByValue:true,expression:`new Promise(resolve=>window.extensionHandler(${JSON.stringify({...message,type:'run',id:'isolated-job'})},{id:'isolated-test'},resolve))`});assert.equal(reply.exceptionDetails,undefined);return reply.result.value;};
-  await page.evaluate(()=>{
-    document.querySelector('#transcript').innerHTML='<article><div data-testid="assistant-message">Готово — burger.pdf.</div><div role="button" data-testid="file-card">Burger Документ · PDF</div></article>';
-    window.downloadClicks=0;document.querySelector('[data-testid="file-card"]').onclick=()=>{
-      const viewer=document.createElement('section');viewer.innerHTML='<h2>Burger · PDF</h2><button title="Скачать">↓</button>';
-      viewer.querySelector('button').onclick=()=>{window.downloadClicks++;const link=document.createElement('a');link.download='burger.pdf';link.href=URL.createObjectURL(new Blob(['%PDF-1.7\nnative generated burger\n%%EOF'],{type:'application/pdf'}));link.click();URL.revokeObjectURL(link.href);};document.body.append(viewer);
-    };
-  });
-  const result=await run({kind:'open',catalogCache:mockCatalog()});assert.equal(result.done,true,result.error);assert.deepEqual(result.result.warnings,[]);const files=result.result.snapshot.messages.at(-1).files;assert.equal(files.length,1);assert.equal(files[0].name,'burger.pdf');assert.equal(Buffer.from(files[0].data,'base64').toString(),'%PDF-1.7\nnative generated burger\n%%EOF');assert.equal(await page.evaluate(()=>window.downloadClicks),1);assert.equal(downloads.length,0);
-});
-test('the PDF download observer leaves ordinary user downloads working outside a requested capture',{skip:!executable},async t=>{
-  const {page}=await fixture(t);const downloading=page.waitForEvent('download');await page.evaluate(()=>{const link=document.createElement('a');link.download='manual.pdf';link.href=URL.createObjectURL(new Blob(['%PDF-1.7\nmanual\n%%EOF'],{type:'application/pdf'}));link.click();});const download=await downloading;assert.equal(download.suggestedFilename(),'manual.pdf');assert.equal(await readFile(await download.path(),'utf8'),'%PDF-1.7\nmanual\n%%EOF');
 });
 test('a reused PDF viewer waits for the new blob instead of copying a previous document',{skip:!executable},async t=>{
   const {page,run}=await fixture(t);await page.evaluate(()=>{

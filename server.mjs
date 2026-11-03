@@ -19,7 +19,8 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
     await catalogInitialization;
   }
   async function executeWithCatalog(payload){
-    await ensureModelCatalog();const result=await bridge.execute({...payload,catalogCache:store.modelCatalog});
+    let downloadedCount=0,downloadedSize=0;
+    await ensureModelCatalog();const result=await bridge.execute({...payload,catalogCache:store.modelCatalog},{onFile:async file=>{const size=Buffer.byteLength(file.data,'base64');if(downloadedCount>=MAX_FILES||downloadedSize+size>MAX_TOTAL)throw Error('Превышен лимит созданных файлов');const meta=await store.putFile(file);downloadedCount++;downloadedSize+=meta.size;return meta;}});
     if(result?.catalog){
       result.catalog=catalogFor(store.modelCatalog,result.catalog.current,result.catalog.warning||catalogWarning);
     }
@@ -35,7 +36,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
       for(const message of snapshot.messages.slice(0,2000)){
         if(!['user','assistant'].includes(message?.role)||typeof message.text!=='string')continue;
         const files=[];
-        for(const file of (Array.isArray(message.files)?message.files:[]).slice(0,MAX_FILES))files.push(await store.putFile(file));
+        for(const file of (Array.isArray(message.files)?message.files:[]).slice(0,MAX_FILES))files.push(file.id?(await store.readFile(file.id)).meta:await store.putFile(file));
         const prior=chat.messages.find(m=>m.role===message.role&&m.text===message.text);
         if(!files.length&&prior?.files?.length)files.push(...prior.files);
         messages.push({role:message.role,text:message.text.slice(0,500000),files});
@@ -188,7 +189,7 @@ export function createApp({ auth, bridge, secure = false, store = new DataStore(
         try{
           const result=await bridge.send({chatId:chat.id,text:body.text,url:chat.url,settings,files,catalogCache:store.modelCatalog,
             onUpdate:data=>{answer.text=data.text;if(data.url)chat.url=conversationURL(data.url);write({type:'update',...data});},
-            onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});},
+            onFile:async file=>{if(answer.files.length>=MAX_FILES)throw Error('За один ответ можно получить до 5 файлов');if(typeof file?.data==='string'&&generatedSize+Buffer.byteLength(file.data,'base64')>MAX_TOTAL)throw Error('Общий размер созданных файлов больше 25 МБ');const meta=await store.putFile(file);generatedSize+=meta.size;answer.files.push(meta);write({type:'file',file:meta});return meta;},
             onWarning:warning=>write({type:'warning',warning})});
           if(result?.url)chat.url=conversationURL(result.url);
           applyState(chat,result?.state);

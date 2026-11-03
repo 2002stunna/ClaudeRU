@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {readBrowserDownload} from './browser-download.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { conversationURL } from './bridge.mjs';
 
@@ -26,15 +27,15 @@ export class ExtensionBridge {
       if(req.method==='GET'&&['/poll','/health'].includes(req.url)){
         const version=req.headers['x-clauderu-version'];
         this.clientVersion=typeof version==='string'&&/^\d+\.\d+\.\d+$/.test(version)?version:null;
-        if(req.headers['x-clauderu-protocol']!=='12'||req.headers['x-clauderu-page-protocol']!=='12'){
+        if(req.headers['x-clauderu-protocol']!=='13'||req.headers['x-clauderu-page-protocol']!=='13'){
           this.lastSeen=0;
-          this.compatibilityError=req.headers['x-clauderu-protocol']!=='12'
-            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.5.6 на странице browser://extensions/ и обновите вкладку Claude.'
+          this.compatibilityError=req.headers['x-clauderu-protocol']!=='13'
+            ?'Работает старая версия расширения. Перезагрузите ClaudeRU до версии 0.6.0 на странице browser://extensions/ и обновите вкладку Claude.'
             :'Расширение обновлено, но вкладка Claude использует старый код. Обновите страницу claude.ai и подключите её заново.';
-          return json(426,{error:this.compatibilityError,requiredProtocol:12});
+          return json(426,{error:this.compatibilityError,requiredProtocol:13});
         }
         this.lastSeen=Date.now();this.compatibilityError=null;
-        if(req.url==='/health')return json(200,{ok:true,protocol:12});
+        if(req.url==='/health')return json(200,{ok:true,protocol:13});
       }
       if (req.method === 'GET' && req.url === '/poll') {
         let timer;
@@ -62,6 +63,9 @@ export class ExtensionBridge {
           } else if (event.type === 'file') {
             if(!job.onFile)return json(400,{error:'Files not accepted'});
             await job.onFile(event.file);
+          } else if(event.type==='download'){
+            if(!job.onFile)return json(400,{error:'Files not accepted'});
+            try{const file=await readBrowserDownload(job.id,event.download,job.createdAt);const saved=await job.onFile(file);return json(200,{ok:true,file:saved});}catch(e){return json(400,{error:e.message});}
           } else if (event.type === 'warning') { job.onWarning?.(String(event.warning).slice(0,1000));
           } else if (event.type === 'done') { this.finish(job.id,null,event.result); }
           else if (event.type === 'error') { const error=new Error(String(event.error || 'Ошибка расширения').slice(0,1000));error.notSent=event.notSent===true;error.state=event.state;this.finish(job.id,error); }
@@ -87,7 +91,7 @@ export class ExtensionBridge {
     return new Promise((resolve,reject)=>{
       const id=randomBytes(16).toString('hex');
       const timer=setTimeout(()=>this.finish(id,new Error('Нет завершённого ответа за 4 минуты. Проверьте вкладку Claude на Mac перед повторной отправкой.')),this.timeout);
-      this.jobs.set(id,{id,key,payload,...handlers,resolve,reject,timer,delivered:false});
+      this.jobs.set(id,{id,key,payload,...handlers,resolve,reject,timer,delivered:false,createdAt:Date.now()});
       for(const deliver of [...this.pollWaiters])deliver();
     });
   }

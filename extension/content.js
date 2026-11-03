@@ -1,6 +1,7 @@
 // Isolated extension world. No account credentials or private APIs are read.
 (() => {
   let busy=false, modelCache={}, managedCache=false, activeJobId=null, ownedDraft=null;
+  const downloadedCards=new WeakMap();
   const MODELS=['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5','Opus 5'];
   // Timers in a hidden Claude tab can be throttled for seconds. The extension's
   // worker owns short waits; readiness is still checked in the actual page.
@@ -248,8 +249,8 @@
     return scope;
   }
   const rasterExtension=/\.(png|jpe?g|gif|webp|avif|bmp)$/i;
-  function imageReferences(scope){
-    const images=all('img',scope).filter(img=>activeControl(img)&&img.getBoundingClientRect().width>=48&&img.getBoundingClientRect().height>=48&&!img.closest('[data-testid="message-actions"],[data-testid="user-message-actions"]'));
+  function imageReferences(scope,excluded=[]){
+    const images=all('img',scope).filter(img=>!excluded.some(c=>c.contains(img))&&activeControl(img)&&img.getBoundingClientRect().width>=48&&img.getBoundingClientRect().height>=48&&!img.closest('[data-testid="message-actions"],[data-testid="user-message-actions"]'));
     const mentioned=[...new Set((scope.innerText||'').match(/[\p{L}\p{N}_-][\p{L}\p{N}_.-]*\.(?:png|jpe?g|gif|webp|avif|bmp)\b/giu)||[])];
     return images.flatMap((img,i)=>{
       const href=img.currentSrc||img.src;if(!href)return [];
@@ -274,7 +275,7 @@
     const describe=node=>({tag:node.tagName,testId:node.getAttribute('data-testid'),role:node.getAttribute('role'),label:(node.getAttribute('aria-label')||node.getAttribute('title')||node.getAttribute('alt')||'').slice(0,160),parents:[...function*(n){for(let i=0;n&&i<5;i++,n=n.parentElement)yield n.tagName+(n.getAttribute('data-testid')?'[data-testid='+n.getAttribute('data-testid')+']':'')+(n.getAttribute('role')?'[role='+n.getAttribute('role')+']':'');}(node.parentElement)]});
     const root=responses().at(-1),scope=root?assistantFileScope(root):null;
     const imageInfo=img=>({...describe(img),inLastTurn:!!scope?.contains(img),width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,complete:img.complete,source:address(img.currentSrc||img.src)});
-    return {version:12,path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
+    return {version:13,path:location.pathname.replace(/[a-f0-9-]{24,}/gi,'…'),assistantCount:responses().length,scope:scope?describe(scope):null,images:all('img').filter(visible).slice(-40).map(imageInfo),cards:scope?pdfCards(scope).slice(0,10).map(c=>({...describe(c.container),target:describe(c.target),references:pdfReferences(c.container,'document.pdf').map(r=>address(r.href))})):[],media:all('iframe[src],embed[src],object[data],a[download]').filter(visible).slice(-20).map(n=>({...describe(n),source:address(n.getAttribute('href')||n.getAttribute('src')||n.getAttribute('data'))})),buttons:all('button,[role="button"]').filter(n=>visible(n)&&/скачать|download|pdf|png|документ|document/i.test(label(n))).slice(-20).map(describe),editor:editor()?describe(editor()):null,composer:composerRoot()?describe(composerRoot()):null,hasComposerAttachments:hasComposerAttachments(composerRoot())};
   }
   const pdfCardSelector='[data-testid="file-thumbnail"],[data-testid="file-card"],[data-testid="generated-file"],[data-testid="file-attachment"],[role="button"],button';
   function pdfCards(root){
@@ -309,24 +310,39 @@
     });
   }
   function downloadControls(scope=document){return all('button,[role="button"]',scope).filter(n=>activeControl(n)&&[label(n),n.getAttribute('aria-label'),n.getAttribute('title')].some(s=>/^(download|скачать)(?:\s|$)/i.test(s||'')));}
-  async function nativePDFDownload(button,name){
-    const channel='clauderu-native-download-v1',nonce=crypto.randomUUID().replaceAll('-','');let armed=false,file=null,error='';
-    const receive=event=>{const data=event.data;if(event.source!==window||event.origin!==location.origin||data?.channel!==channel||data.nonce!==nonce)return;if(data.type==='armed')armed=true;else if(data.type==='file')file=data.file;else if(data.type==='error')error=String(data.error||'Не удалось получить файл');};
-    window.addEventListener('message',receive);
+  async function browserFileDownload(button,name){
+    const nonce=crypto.randomUUID().replaceAll('-','');
+    const begin=await chrome.runtime.sendMessage({type:'download-begin',id:activeJobId,nonce,name});
+    if(!begin?.ok)throw Error(begin?.error||'Браузер не разрешил управление загрузками');
     try{
-      window.postMessage({channel,type:'arm',nonce,name},location.origin);await waitFor(()=>armed,1000);
-      button.click();await waitFor(()=>file||error,9000);if(error)throw Error(error);
-      if(typeof file?.data!=='string'||file.data.length>Math.ceil(20*1024*1024*4/3)+4)throw Error('Некорректный размер файла');
-      const bytes=Uint8Array.from(atob(file.data),c=>c.charCodeAt(0));
-      if(!new TextDecoder().decode(bytes.subarray(0,1024)).includes('%PDF-'))throw Error('Вместо PDF получена страница просмотра');
-      return {href:URL.createObjectURL(new Blob([bytes],{type:'application/pdf'})),download:file.name||name,innerText:name,requirePDF:true,revoke:true};
-    }finally{window.postMessage({channel,type:'cancel',nonce},location.origin);window.removeEventListener('message',receive);}
+      button.click();const deadline=Date.now()+60000;
+      while(Date.now()<deadline){
+        const result=await chrome.runtime.sendMessage({type:'download-state',id:activeJobId,nonce});
+        if(!result?.ok||result.state==='error')throw Error(result?.error||'Ошибка скачивания файла');
+        if(result.state==='done'){if(!/^[a-f0-9]{32}$/.test(result.file?.id||''))throw Error('Сервер не подтвердил сохранение файла');return result.file;}
+        await delay(150);
+      }
+      throw Error('Браузер не завершил скачивание за минуту');
+    }finally{await chrome.runtime.sendMessage({type:'download-cancel',id:activeJobId,nonce}).catch(()=>{});}
   }
-  async function pdfCardFiles(root){
-    const references=[],warnings=[];
+  function cardDownloadName(card,button){
+    const title=card.getAttribute('data-filename')||(button.getAttribute('aria-label')||button.getAttribute('title')||label(button)).replace(/^(?:скачать|download)\s+/i,'').trim();
+    if(/\.[a-z0-9]{2,8}$/i.test(title))return title;
+    const ext=/\b(PDF|DOCX|XLSX|PPTX|PNG|JPE?G|GIF|WEBP|CSV|TXT|ZIP)\b/i.exec(label(card))?.[1]?.toLowerCase();
+    return ext?title+'.'+ext:null;
+  }
+  async function pdfCardFiles(root,{force=false}={}){
+    const references=[],warnings=[],files=[],exported=[];
     const cards=pdfCards(root);
+    for(const block of all('[data-testid="file-card-block"]',root))if(!cards.some(c=>block.contains(c.container)))cards.push({container:block,target:block.querySelector('[data-testid="file-card-open"]')||block});
     for(const {container:card,target} of cards.slice(0,5)){
-      const name=pdfCardName(card),direct=pdfReferences(card,name);
+      const block=card.closest('[data-testid="file-card-block"]')||card,directButton=downloadControls(block)[0];
+      if(exported.includes(block))continue;
+      const name=directButton?cardDownloadName(block,directButton)||pdfCardName(card):pdfCardName(card);
+      const cardSignature=location.pathname+'\n'+label(block)+'\n'+all('img[src],[data-file-id]',block).map(n=>n.getAttribute('src')||n.getAttribute('data-file-id')).join('\n'),cached=downloadedCards.get(block);
+      if(!force&&cached?.signature===cardSignature){files.push(cached.file);exported.push(block);continue;}
+      if(directButton){try{const file=await browserFileDownload(directButton,name);files.push(file);exported.push(block);downloadedCards.set(block,{signature:cardSignature,file});}catch(e){warnings.push('Не удалось скачать «'+name+'»: '+e.message);}continue;}
+      const direct=pdfReferences(card,name);
       if(direct.length){references.push(...direct.map(r=>({...r,pdfGroup:card})));continue;}
       const panelSelector='[data-testid="file-preview"],[data-testid="document-preview"],[data-testid="file-viewer"],[data-testid="document-viewer"],[data-testid="artifact-panel"],[role="dialog"],iframe[src],embed[src],object[data]';
       const signature=n=>[n.textContent,...pdfReferences(n,name).map(r=>r.href)].join('\n');
@@ -343,11 +359,11 @@
           if(download)return {download};
           const links=current.flatMap(n=>pdfReferences(n,name));return links.length?{links}:null;
         },3500);
-        if(sources.download)references.push({...await nativePDFDownload(sources.download,name),pdfGroup:card});
+        if(sources.download){const file=await browserFileDownload(sources.download,name);files.push(file);exported.push(block);downloadedCards.set(block,{signature:cardSignature,file});}
         else references.push(...sources.links.map(r=>({...r,pdfGroup:card})));
       }catch{warnings.push('Не удалось получить PDF «'+name+'» из Claude. Откройте документ на Mac и обновите этот чат.');}
     }
-    return {references,warnings};
+    return {references,warnings,files,exported};
   }
   async function collectFiles({openArtifact=false}={}){
     const files=[],warnings=[];let total=0;const seen=new Set(),downloadedPDFs=new Set(),pdfErrors=new Map();
@@ -369,8 +385,8 @@
       }catch{/* Missing export does not invalidate the assistant's answer. */}
     }
     const linkSelector='a[download],a[href^="blob:"],a[href*="/download"],a[href*="/files/"],a[href*="/artifacts/"],a[href$=".pdf" i],a[href*=".pdf?" i]';
-    const pdfs=await pdfCardFiles(scope);warnings.push(...pdfs.warnings);
-    const links=[...imageReferences(scope),...[...new Set([...all(linkSelector,scope),...(panel?all(linkSelector,panel):[])])].filter(visible),...pdfs.references];
+    const pdfs=await pdfCardFiles(scope,{force:openArtifact});warnings.push(...pdfs.warnings);files.push(...pdfs.files);total+=pdfs.files.reduce((sum,f)=>sum+f.size,0);
+    const links=[...imageReferences(scope,pdfs.exported),...[...new Set([...all(linkSelector,scope),...(panel?all(linkSelector,panel):[])])].filter(visible),...pdfs.references];
     for(const a of links){
       if(files.length>=5)break;if(a.pdfGroup&&downloadedPDFs.has(a.pdfGroup))continue;
       const url=new URL(a.href,location.href);
@@ -413,7 +429,7 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id)return;
-    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:12});return;}
+    if(message.type==='ready'){respond({ready:document.readyState==='complete',version:13});return;}
     if(message.type!=='run')return;
     if(message.kind==='state'){respond({done:true,result:{state:readState()}});return;}
     if(message.kind==='diagnostics'){respond({done:true,result:fileDiagnostics()});return;}
@@ -481,7 +497,7 @@
           const settleMs=explicitlyDone?500:seenStop?1000:10000;
           if(text&&!stopping&&Date.now()-unchangedSince>=settleMs&&(!explicitlyDone||Date.now()-completedSince>=settleMs)){
             const {files,warnings}=await collectFiles({openArtifact:true});
-            for(const file of files){const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
+            for(const file of files){if(file.id)continue;const ack=await chrome.runtime.sendMessage({type:'file',id:message.id,file});if(!ack?.ok)throw Error('Не удалось сохранить созданный файл на Mac');}
             for(const warning of warnings)await chrome.runtime.sendMessage({type:'warning',id:message.id,warning});
             const state=snapshot();respond({done:true,result:{url:state.url,title:state.title,state:state.state}});return;
           }

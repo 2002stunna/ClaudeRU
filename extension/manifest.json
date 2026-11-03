@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ClaudeRU — домашний мост",
-  "version": "0.5.6",
+  "version": "0.6.0",
   "description": "Связывает выбранную вкладку Claude с вашим домашним сервером ClaudeRU.",
   "permissions": [
     "storage",
-    "alarms"
+    "alarms",
+    "downloads"
   ],
   "host_permissions": [
     "http://127.0.0.1:3001/*",
@@ -18,16 +19,6 @@
     "default_popup": "popup.html"
   },
   "content_scripts": [
-    {
-      "matches": [
-        "https://claude.ai/*"
-      ],
-      "js": [
-        "download-observer.js"
-      ],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
     {
       "matches": [
         "https://claude.ai/*"
